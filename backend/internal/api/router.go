@@ -1,6 +1,7 @@
 // Package api wires HTTP routes, handlers and middleware for the management
-// backend. Phase 1 has no authentication: the API must only be reachable from
-// a controlled, isolated network.
+// backend. Access can be gated by one shared password (see auth.go); that is a
+// convenience barrier, not real authentication, so the API must still only be
+// reachable from a controlled, isolated network.
 package api
 
 import (
@@ -31,6 +32,10 @@ type Handlers struct {
 	// termSem bounds the number of interactive terminal WebSockets proxied by
 	// this backend.
 	termSem chan struct{}
+	// auth gates /api/v1 behind the shared access password; disabled when the
+	// password is empty.
+	auth         *authGate
+	loginLimiter *loginLimiter
 }
 
 func NewHandlers(cfg *config.Config, db *gorm.DB, sched *scheduler.Scheduler, store *logstore.Store, hub *ws.Hub, agent *agentclient.Client) *Handlers {
@@ -40,7 +45,9 @@ func NewHandlers(cfg *config.Config, db *gorm.DB, sched *scheduler.Scheduler, st
 	}
 	return &Handlers{
 		cfg: cfg, db: db, sched: sched, store: store, hub: hub, agent: agent,
-		termSem: make(chan struct{}, maxTerm),
+		termSem:      make(chan struct{}, maxTerm),
+		auth:         newAuthGate(cfg.Auth.AccessPassword, time.Duration(cfg.Auth.SessionHours)*time.Hour),
+		loginLimiter: newLoginLimiter(10, time.Minute),
 	}
 }
 
@@ -49,56 +56,64 @@ func (h *Handlers) Register(r *gin.Engine) {
 	r.Use(h.cors(), h.bodyLimit())
 	v1 := r.Group("/api/v1")
 
+	// Public routes: liveness plus the login endpoints themselves.
 	v1.GET("/health", h.Health)
-	v1.GET("/config/limits", h.Limits)
-	v1.GET("/stats/overview", h.Overview)
+	v1.GET("/auth/status", h.AuthStatus)
+	v1.POST("/auth/login", h.AuthLogin)
+	v1.POST("/auth/logout", h.AuthLogout)
 
-	v1.GET("/servers", h.ListServers)
-	v1.POST("/servers", h.CreateServer)
-	v1.GET("/servers/:id", h.GetServer)
-	v1.PUT("/servers/:id", h.UpdateServer)
-	v1.DELETE("/servers/:id", h.DeleteServer)
-	v1.POST("/servers/:id/check", h.CheckServer)
-	v1.GET("/servers/:id/agent", h.GetAgent)
-	v1.GET("/servers/:id/agent/update/check", h.AgentUpdateCheck)
-	v1.POST("/servers/:id/agent/update", h.AgentUpdate)
+	// Everything below requires a valid session cookie when a password is set.
+	p := v1.Group("", h.requireAuth())
 
-	v1.POST("/agents/update/check", h.BatchAgentUpdateCheck)
-	v1.POST("/agents/update", h.BatchAgentUpdate)
+	p.GET("/config/limits", h.Limits)
+	p.GET("/stats/overview", h.Overview)
 
-	v1.GET("/servers/:id/fs/list", h.FSList)
-	v1.GET("/servers/:id/fs/stat", h.FSStat)
-	v1.GET("/servers/:id/fs/read", h.FSRead)
-	v1.GET("/servers/:id/fs/download", h.FSDownload)
-	v1.PUT("/servers/:id/fs/write", h.FSWrite)
-	v1.PUT("/servers/:id/fs/upload", h.FSUpload)
-	v1.POST("/servers/:id/fs/op", h.FSOp)
+	p.GET("/servers", h.ListServers)
+	p.POST("/servers", h.CreateServer)
+	p.GET("/servers/:id", h.GetServer)
+	p.PUT("/servers/:id", h.UpdateServer)
+	p.DELETE("/servers/:id", h.DeleteServer)
+	p.GET("/servers/:id/agent", h.GetAgent)
+	p.GET("/servers/:id/agent/update/check", h.AgentUpdateCheck)
+	p.POST("/servers/:id/agent/update", h.AgentUpdate)
 
-	v1.GET("/groups", h.ListGroups)
-	v1.POST("/groups", h.CreateGroup)
-	v1.PUT("/groups/:id", h.UpdateGroup)
-	v1.DELETE("/groups/:id", h.DeleteGroup)
+	p.POST("/agents/check", h.BatchCheckServers)
+	p.POST("/agents/update/check", h.BatchAgentUpdateCheck)
+	p.POST("/agents/update", h.BatchAgentUpdate)
 
-	v1.GET("/tags", h.ListTags)
-	v1.POST("/tags", h.CreateTag)
-	v1.DELETE("/tags/:id", h.DeleteTag)
+	p.GET("/servers/:id/fs/list", h.FSList)
+	p.GET("/servers/:id/fs/stat", h.FSStat)
+	p.GET("/servers/:id/fs/read", h.FSRead)
+	p.GET("/servers/:id/fs/download", h.FSDownload)
+	p.PUT("/servers/:id/fs/write", h.FSWrite)
+	p.PUT("/servers/:id/fs/upload", h.FSUpload)
+	p.POST("/servers/:id/fs/op", h.FSOp)
 
-	v1.POST("/tasks", h.CreateTask)
-	v1.GET("/tasks", h.ListTasks)
-	v1.GET("/tasks/:id", h.GetTask)
-	v1.GET("/tasks/:id/targets", h.ListTaskTargets)
-	v1.POST("/tasks/:id/cancel", h.CancelTask)
+	p.GET("/groups", h.ListGroups)
+	p.POST("/groups", h.CreateGroup)
+	p.PUT("/groups/:id", h.UpdateGroup)
+	p.DELETE("/groups/:id", h.DeleteGroup)
 
-	v1.GET("/targets/:id", h.GetTarget)
-	v1.GET("/targets/:id/logs", h.GetTargetLogs)
-	v1.GET("/targets/:id/logs/download", h.DownloadTargetLogs)
-	v1.POST("/targets/:id/cancel", h.CancelTarget)
-	v1.POST("/targets/:id/retry", h.RetryTarget)
+	p.GET("/tags", h.ListTags)
+	p.POST("/tags", h.CreateTag)
+	p.DELETE("/tags/:id", h.DeleteTag)
 
-	v1.GET("/audit", h.ListAudit)
+	p.POST("/tasks", h.CreateTask)
+	p.GET("/tasks", h.ListTasks)
+	p.GET("/tasks/:id", h.GetTask)
+	p.GET("/tasks/:id/targets", h.ListTaskTargets)
+	p.POST("/tasks/:id/cancel", h.CancelTask)
 
-	v1.GET("/ws/tasks/:id", h.TaskWS)
-	v1.GET("/ws/terminal/:id", h.TerminalWS)
+	p.GET("/targets/:id", h.GetTarget)
+	p.GET("/targets/:id/logs", h.GetTargetLogs)
+	p.GET("/targets/:id/logs/download", h.DownloadTargetLogs)
+	p.POST("/targets/:id/cancel", h.CancelTarget)
+	p.POST("/targets/:id/retry", h.RetryTarget)
+
+	p.GET("/audit", h.ListAudit)
+
+	p.GET("/ws/tasks/:id", h.TaskWS)
+	p.GET("/ws/terminal/:id", h.TerminalWS)
 }
 
 // ---- response helpers ----
@@ -138,8 +153,14 @@ func pageParams(c *gin.Context) (page, size int) {
 // ---- middleware ----
 
 func (h *Handlers) cors() gin.HandlerFunc {
+	// Cookies can only be sent cross-origin when the origin is explicit; "*"
+	// is incompatible with credentialed requests.
+	allowCredentials := h.cfg.AllowOrigin != "" && h.cfg.AllowOrigin != "*"
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", h.cfg.AllowOrigin)
+		if allowCredentials {
+			c.Header("Access-Control-Allow-Credentials", "true")
+		}
 		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type,Authorization")
 		if c.Request.Method == http.MethodOptions {

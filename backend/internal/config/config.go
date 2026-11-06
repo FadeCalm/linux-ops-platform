@@ -34,6 +34,15 @@ type SchedulerConfig struct {
 	AgentRequestTimeoutS int   `yaml:"agent_request_timeout_sec"`
 }
 
+// AuthConfig gates the whole UI/API behind one shared access password. This is
+// deliberately not user management: it stops casual access on an isolated
+// network, nothing more. Empty AccessPassword disables the gate.
+type AuthConfig struct {
+	AccessPassword string `yaml:"access_password"`
+	// SessionHours is the lifetime of a login cookie.
+	SessionHours int `yaml:"session_hours"`
+}
+
 type WebSocketConfig struct {
 	MaxConnections  int `yaml:"max_connections"`
 	ReplayBufferLen int `yaml:"replay_buffer_len"`
@@ -62,6 +71,7 @@ type Config struct {
 	LogDir      string          `yaml:"log_dir"`
 	Scheduler   SchedulerConfig `yaml:"scheduler"`
 	WebSocket   WebSocketConfig `yaml:"websocket"`
+	Auth        AuthConfig      `yaml:"auth"`
 }
 
 func Default() *Config {
@@ -85,6 +95,7 @@ func Default() *Config {
 			AgentRequestTimeoutS: 10,
 		},
 		WebSocket: WebSocketConfig{MaxConnections: 200, ReplayBufferLen: 2000, MaxTerminalSessions: 16},
+		Auth:      AuthConfig{SessionHours: 12},
 	}
 }
 
@@ -141,6 +152,14 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("FRONTEND_DIR"); v != "" {
 		cfg.FrontendDir = v
 	}
+	if v := os.Getenv("ACCESS_PASSWORD"); v != "" {
+		cfg.Auth.AccessPassword = v
+	}
+	if v := os.Getenv("SESSION_HOURS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Auth.SessionHours = n
+		}
+	}
 }
 
 func (c *Config) Validate() error {
@@ -172,6 +191,9 @@ func (c *Config) Validate() error {
 	}
 	if c.WebSocket.MaxConnections <= 0 {
 		c.WebSocket.MaxConnections = 200
+	}
+	if c.Auth.SessionHours <= 0 {
+		c.Auth.SessionHours = 12
 	}
 	return nil
 }

@@ -16,6 +16,13 @@
         </el-select>
         <el-button icon="el-icon-search" @click="reload">查询</el-button>
         <div class="spacer"></div>
+        <el-tooltip content="未勾选时检查当前页全部服务器" placement="top">
+          <el-button
+            icon="el-icon-circle-check"
+            :loading="healthChecking"
+            @click="batchHealthCheck"
+          >批量健康检查</el-button>
+        </el-tooltip>
         <el-tooltip content="未勾选时检查当前页全部在线服务器" placement="top">
           <el-button
             icon="el-icon-refresh"
@@ -81,11 +88,10 @@
         <el-table-column label="最后心跳" width="170">
           <template slot-scope="{ row }">{{ formatTime(row.last_heartbeat_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="420" fixed="right">
+        <el-table-column label="操作" width="360" fixed="right">
           <template slot-scope="{ row }">
             <el-button type="text" @click="openExec(row)">执行</el-button>
             <el-button type="text" @click="openTerminal(row)">终端</el-button>
-            <el-button type="text" :loading="checking[row.id]" @click="checkServer(row)">健康检查</el-button>
             <el-tooltip
               v-if="row.status === 'online'"
               :disabled="!hasUpdate(row)"
@@ -122,8 +128,12 @@
     <!-- create / edit -->
     <el-dialog :title="editing ? '编辑服务器' : '新增服务器'" :visible.sync="editVisible" width="520px">
       <el-form :model="form" label-width="90px">
-        <el-form-item label="名称" required>
-          <el-input v-model="form.name" placeholder="例如 web-01" />
+        <el-form-item label="名称">
+          <el-input v-model="form.name" :placeholder="editing ? '例如 web-01' : '留空则自动使用主机名'" />
+          <div v-if="!editing" class="form-hint">
+            新增时可留空：保存后会尝试连接 Agent，并以目标主机返回的主机名作为名称；
+            连接失败则暂用 IP，稍后可手动修改。
+          </div>
         </el-form-item>
         <el-form-item label="IP / 主机" required>
           <el-input v-model="form.ip" placeholder="10.0.0.11" />
@@ -229,6 +239,43 @@
         <el-button @click="updateVisible = false">关闭</el-button>
       </span>
     </el-dialog>
+
+    <!-- batch health check results -->
+    <el-dialog title="批量健康检查结果" :visible.sync="healthVisible" width="820px">
+      <el-table :data="healthResults" border empty-text="暂无结果">
+        <el-table-column prop="name" label="服务器" min-width="140" />
+        <el-table-column label="Agent 地址" min-width="150">
+          <template slot-scope="{ row }"><span class="mono">{{ row.ip }}:{{ row.agent_port }}</span></template>
+        </el-table-column>
+        <el-table-column label="状态" width="90">
+          <template slot-scope="{ row }">
+            <span class="status-badge" :class="row.online ? 'st-online' : 'st-offline'">
+              {{ row.online ? '在线' : '离线' }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="hostname" label="主机名" min-width="130">
+          <template slot-scope="{ row }">{{ row.hostname || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="系统 / 架构" width="130">
+          <template slot-scope="{ row }">
+            <span class="muted">{{ row.os || '-' }} / {{ row.arch || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="Agent 版本" width="110">
+          <template slot-scope="{ row }"><span class="mono">{{ row.version || '-' }}</span></template>
+        </el-table-column>
+        <el-table-column label="说明" min-width="150">
+          <template slot-scope="{ row }">
+            <span v-if="row.error" style="color: var(--danger)">{{ row.error }}</span>
+            <span v-else class="muted">-</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <span slot="footer">
+        <el-button @click="healthVisible = false">关闭</el-button>
+      </span>
+    </el-dialog>
   </div>
 </template>
 
@@ -252,7 +299,9 @@ export default {
       editVisible: false,
       editing: false,
       form: emptyForm(),
-      checking: {},
+      healthChecking: false,
+      healthVisible: false,
+      healthResults: [],
       selected: [],
       updating: {},
       checkingUpdates: false,
@@ -398,18 +447,34 @@ export default {
       this.editVisible = true
     },
     async saveServer() {
-      if (!this.form.name || !this.form.ip) {
-        this.$message.warning('名称与 IP 为必填项')
+      const name = (this.form.name || '').trim()
+      const ip = (this.form.ip || '').trim()
+      if (!ip) {
+        this.$message.warning('请填写 IP / 主机')
         return
       }
+      if (this.editing && !name) {
+        this.$message.warning('请填写名称')
+        return
+      }
+      const autoName = !this.editing && !name
       this.saving = true
       try {
         if (this.editing) {
           await api.servers.update(this.form.id, this.form)
           this.$message.success('已更新')
         } else {
-          await api.servers.create(this.form)
-          this.$message.success('已创建')
+          const created = await api.servers.create(this.form)
+          if (autoName && created.status === 'online') {
+            this.$message.success(`已创建：${created.name}`)
+          } else if (autoName) {
+            this.$notify.warning({
+              title: '已创建，但未能连接 Agent',
+              message: '名称暂用 IP，Agent 上线后可手动改为主机名'
+            })
+          } else {
+            this.$message.success('已创建')
+          }
         }
         this.editVisible = false
         await Promise.all([this.load(), this.loadMeta()])
@@ -433,23 +498,27 @@ export default {
         this.$message.error(e.message)
       }
     },
-    async checkServer(row) {
-      this.$set(this.checking, row.id, true)
+    async batchHealthCheck() {
+      let ids = this.selected.map((s) => s.id)
+      if (!ids.length) {
+        ids = this.servers.map((s) => s.id)
+      }
+      if (!ids.length) {
+        this.$message.warning('当前页没有服务器可检查')
+        return
+      }
+      this.healthChecking = true
       try {
-        const res = await api.servers.check(row.id)
-        if (res.online) {
-          this.$notify.success({
-            title: 'Agent 在线',
-            message: `${res.info.hostname || row.ip} · ${res.info.os}/${res.info.arch} · v${res.info.version}`
-          })
-        } else {
-          this.$notify.error({ title: 'Agent 离线', message: res.error || '无法连接' })
-        }
+        const res = await api.servers.batchCheck(ids)
+        this.healthResults = res.items || []
+        this.healthVisible = true
+        const online = this.healthResults.filter((i) => i.online).length
+        this.$message.success(`检查完成：在线 ${online} / ${this.healthResults.length}`)
         this.load()
       } catch (e) {
         this.$message.error(e.message)
       } finally {
-        this.$set(this.checking, row.id, false)
+        this.healthChecking = false
       }
     },
     onSelectionChange(rows) {
@@ -618,6 +687,12 @@ export default {
 </script>
 
 <style scoped>
+.form-hint {
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
 /* Highlight the row action when a newer agent build is known to exist. */
 .upgrade-hot {
   color: #b45309 !important;

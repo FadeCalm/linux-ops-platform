@@ -1,10 +1,12 @@
-# 部署与运维手册（M1–M3）
+# 部署与运维手册
 
 目标环境：**单台 Linux amd64 服务器**，可访问外网（用于安装 Go/Node/Docker 镜像）。
 后端、Agent、MySQL、MinIO 全部部署在这台服务器上；Agent 同时充当第一台受管主机。
 
 > **安全警告（务必先读）**
-> 第一阶段**没有认证**。任何能访问 8080 / 19090 端口的人都能执行任意命令。
+> 平台有**统一访问口令**（`auth.access_password` / `ACCESS_PASSWORD`），但这不是
+> 真正的认证与授权：没有多用户、没有权限模型，口令和 Cookie 走明文 HTTP。
+> 知道口令的任何人都能执行任意命令；Agent 19090 端口本身没有任何认证。
 > - 默认只监听 `127.0.0.1`
 > - 跨机访问必须显式绑定**内网地址**，并用防火墙/安全组限制到管理网段
 > - 严禁暴露到公网；不要把它描述为「生产安全」
@@ -33,7 +35,7 @@
 | 8080 | 后端 | `127.0.0.1` | REST + WebSocket + 静态前端 |
 | 19090 | Agent | `127.0.0.1` | 被后端调用 |
 | 3306 | MySQL | `127.0.0.1`（docker） | 元数据 |
-| 9000/9001 | MinIO | `127.0.0.1`（docker） | M6 才使用 |
+| 9000/9001 | MinIO | `127.0.0.1`（docker） | 存放 Agent 发布包（自更新源）；大日志功能未启用 |
 
 跨主机部署时：
 
@@ -70,9 +72,14 @@ openssl rand -hex 16
 | `DB_NAME` | 默认 `linux_ops` |
 | `DB_USER` | 默认 `ops` |
 | `DB_PASSWORD` | 后端使用的密码（与 MySQL 用户一致） |
-| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | M6 使用，现在也要求设置 |
+| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | MinIO 管理口令；Agent 发布包也用它上传 |
+| `ACCESS_PASSWORD` | 平台登录口令；留空则由 installer 生成并打印一次 |
 
 `deploy/.env` 必须 `chmod 600`，且不要提交到版本库。
+
+访问口令最终写入 `/etc/linux-ops/backend.env` 的 `ACCESS_PASSWORD`，优先级高于
+`backend.yaml` 里的 `auth.access_password`。修改后重启后端即可生效，所有已登录
+会话立即失效。
 
 ### 3.3 执行安装
 
@@ -92,7 +99,7 @@ installer 会：
    - `/opt/linux-ops-platform/bin`：二进制
    - `/opt/linux-ops-platform/frontend`：前端静态文件
    - `/etc/linux-ops/backend.yaml`、`agent.yaml`
-   - `/etc/linux-ops/backend.env`（600，含 `DB_PASSWORD`、`LISTEN_ADDR`、`LOG_DIR`、`FRONTEND_DIR`）
+   - `/etc/linux-ops/backend.env`（600，含 `DB_PASSWORD`、`LISTEN_ADDR`、`LOG_DIR`、`FRONTEND_DIR`、`ACCESS_PASSWORD`）
    - `/var/lib/linux-ops/logs`：任务日志
 4. 安装并启动 `linux-ops-agent`、`linux-ops-backend` systemd 服务
 5. 等待 `/api/v1/health` 通过
@@ -106,8 +113,10 @@ curl -sS http://127.0.0.1:19090/api/v1/info
 sudo bash tests/smoke.sh
 ```
 
-`tests/smoke.sh` 会依次验证：后端健康 → 选择服务器 → Agent 在线 →
+`tests/smoke.sh` 会依次验证：后端健康 → 登录 → 选择服务器 → Agent 在线 →
 提交真实任务 → 轮询状态 → 读取 stdout/stderr 内容。需要 `curl` 与 `python3`。
+脚本会从 `ACCESS_PASSWORD` 环境变量或 `/etc/linux-ops/backend.env` 读取口令；
+也可以手动指定：`ACCESS_PASSWORD=... tests/smoke.sh`。
 
 浏览器访问：
 
@@ -174,11 +183,19 @@ sudo systemctl enable --now linux-ops-agent linux-ops-backend
 | `scheduler.max_script_bytes` | 65536 | 命令长度上限 |
 | `scheduler.max_output_bytes` | 10485760 | 单路输出上限（展示用） |
 | `scheduler.agent_request_timeout_sec` | 10 | 调用 Agent 的 HTTP 超时 |
+| `minio.endpoint` | 空 | S3/MinIO 地址（`bin/minio_upload.py` 使用） |
+| `minio.access_key` / `secret_key` | 空 | 发布包上传凭证 |
+| `minio.bucket` | `linux-ops-agent` | Agent 发布包所在桶 |
+| `minio.update_base_url` | 空 | 与 Agent 的 `update_base_url` 保持一致 |
 | `websocket.max_connections` | 200 | WS 连接上限 |
 | `websocket.replay_buffer_len` | 2000 | 每目标重放环形缓冲帧数 |
+| `websocket.max_terminal_sessions` | 16 | 后端并发代理的终端会话上限 |
+| `auth.access_password` | 空 | 统一访问口令；空 = 关闭登录校验 |
+| `auth.session_hours` | 12 | 登录 Cookie 有效期（小时） |
 
 环境变量覆盖：`LISTEN_ADDR`、`DB_PASSWORD`、`DB_DSN`、`DB_HOST`、`DB_PORT`、
-`DB_USER`、`DB_NAME`、`LOG_DIR`、`ALLOW_ORIGIN`、`FRONTEND_DIR`。
+`DB_USER`、`DB_NAME`、`LOG_DIR`、`ALLOW_ORIGIN`、`FRONTEND_DIR`、
+`ACCESS_PASSWORD`、`SESSION_HOURS`。
 
 ### 5.2 Agent（`/etc/linux-ops/agent.yaml`）
 
@@ -193,6 +210,16 @@ sudo systemctl enable --now linux-ops-agent linux-ops-backend
 | `default_timeout_ms` | 300000 | 默认超时 |
 | `max_timeout_ms` | 3600000 | 超时上限 |
 | `task_retention_sec` | 3600 | 已结束任务在内存中保留时长 |
+| `log_dir` | `./data/agent-logs` | 预留的本地日志目录 |
+| `terminal.shell` | `/bin/bash` | PTY 启动的 shell |
+| `terminal.work_dir` | `/` | shell 初始目录 |
+| `terminal.user` | 空 | 空 = Agent 用户；`root` 需要 Agent 本身有权限 |
+| `terminal.max_sessions` | 4 | 本机并发终端上限 |
+| `terminal.idle_timeout_sec` | 600 | 空闲关闭会话；0 = 关闭 |
+| `terminal.max_duration_sec` | 3600 | 单会话最长时长；0 = 关闭 |
+| `terminal.history_mode` | `memory` | `memory` 不落 `~/.bash_history`；`inherit` 同普通登录 shell |
+| `update_base_url` | 空 | 制品桶前缀；空 = 关闭自更新 |
+| `update_require_checksum` | `false` | 为 `true` 时拒绝没有 sha256 的发布包 |
 
 环境变量：`AGENT_LISTEN_ADDR`、`AGENT_LISTEN_PORT`、`AGENT_LOG_DIR`。
 
@@ -229,7 +256,8 @@ listen_addr: "10.0.0.11"   # 该主机的内网地址
 调整路径），然后：
 
 1. 在平台「服务器管理」中新增该主机：IP `10.0.0.11`，端口 `19090`
-2. 点「健康检查」，状态应变为 `online`
+   （名称可留空，保存时会探测 Agent 并自动使用其主机名）
+2. 勾选该服务器后点「批量健康检查」，状态应变为 `online`
 3. 防火墙只放行后端所在主机到 19090
 
 ## 7. 安全与隔离检查清单
@@ -238,6 +266,7 @@ listen_addr: "10.0.0.11"   # 该主机的内网地址
 - [ ] 云安全组 / 防火墙限制 8080、19090 到管理网段
 - [ ] 没有把任何端口映射到公网
 - [ ] `deploy/.env`、`/etc/linux-ops/backend.env` 权限 600
+- [ ] 已设置 `ACCESS_PASSWORD`（不能沿用仓库模板里的 `changeme`）
 - [ ] `linuxops` 为普通用户，无多余 sudo 权限
 - [ ] MySQL/MinIO 端口只绑定 `127.0.0.1`
 - [ ] 已知悉：审计 operator 恒为 `anonymous`，无法识别具体人员
@@ -321,7 +350,8 @@ find /var/lib/linux-ops/logs -mindepth 2 -maxdepth 2 -type d -mtime +30 -print
 
 ## 9. 反向代理（可选）
 
-如果需要在管理网段用统一入口访问（仍然**没有认证**），可用 Nginx。
+如果需要在管理网段用统一入口访问，可用 Nginx（访问口令在前端登录页校验，
+反向代理不能替代网络隔离）。
 完整示例见 [deploy/nginx.conf.example](../deploy/nginx.conf.example)，关键是
 WebSocket 升级头必须正确转发：
 
@@ -342,7 +372,8 @@ location /api/v1/ws/ {
 }
 ```
 
-不要在无认证的情况下套公网域名或开放 443。
+即使前面挂了反向代理，也不要暴露到公网；访问口令不是认证，反向代理也不能替代
+网络隔离。
 
 ### 9.1 自定义前缀部署（前端与后端前缀可以不同）
 

@@ -2,9 +2,11 @@
 # For local/dev runs put real values in `configs/local.yaml` (gitignored) and
 # start with: ./bin/backend.exe -config configs/local.yaml
 # Secrets can also come from environment variables:
-#   DB_PASSWORD, DB_DSN (optional full DSN), LISTEN_ADDR, LOG_DIR, FRONTEND_DIR
+#   DB_PASSWORD, DB_DSN (optional full DSN), LISTEN_ADDR, LOG_DIR, FRONTEND_DIR,
+#   ALLOW_ORIGIN, ACCESS_PASSWORD, SESSION_HOURS
 #
-# Phase 1 has no authentication. Bind to a private management interface only.
+# Access is gated by one shared password (auth.access_password), which is not
+# real authentication. Bind to a private management interface only.
 
 listen_addr: "127.0.0.1:8080"
 # Set to a concrete origin in production, e.g. "http://10.0.0.10".
@@ -14,6 +16,14 @@ allow_origin: "*"
 frontend_dir: ""
 
 log_dir: "./data/logs"
+
+# Shared password gate for the UI and API. This is not user management; it only
+# keeps casual visitors out of an isolated management network. Leave the
+# password empty to disable the gate. Prefer the ACCESS_PASSWORD env var when
+# deploying: it keeps the secret out of the file.
+auth:
+  access_password: ""
+  session_hours: 12
 
 mysql:
   host: "127.0.0.1"
@@ -49,3 +59,4 @@ scheduler:
 websocket:
   max_connections: 200
   replay_buffer_len: 2000
+  max_terminal_sessions: 16     # concurrent interactive terminals proxied by the backend

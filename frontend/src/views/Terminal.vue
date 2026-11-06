@@ -21,7 +21,7 @@
         </div>
       </div>
       <div class="hero-actions">
-        <el-button size="mini" icon="el-icon-refresh" :loading="checking" @click="checkServer">检查状态</el-button>
+        <el-button size="mini" icon="el-icon-refresh" :loading="checking" @click="refreshServer">刷新状态</el-button>
         <el-button size="mini" icon="el-icon-cpu" @click="goExec">单机执行</el-button>
         <el-button size="mini" icon="el-icon-folder-opened" @click="goFiles">文件管理</el-button>
         <el-button size="mini" icon="el-icon-document" @click="goHistory">任务历史</el-button>
@@ -83,27 +83,27 @@ import { wsUrl } from '@/api/base'
 import { formatTime, statusClass, statusText } from '@/utils/format'
 
 const TERMINAL_THEME = {
-  background: '#050505',
-  foreground: '#d6d6d6',
-  cursor: '#f5f5f5',
-  cursorAccent: '#050505',
-  selectionBackground: 'rgba(255, 255, 255, 0.22)',
-  black: '#1a1a1a',
-  red: '#f87171',
-  green: '#4ade80',
-  yellow: '#fbbf24',
-  blue: '#93c5fd',
-  magenta: '#e9a8f5',
-  cyan: '#67e8f9',
-  white: '#e5e5e5',
-  brightBlack: '#6b6b6b',
-  brightRed: '#fca5a5',
-  brightGreen: '#86efac',
-  brightYellow: '#fde68a',
-  brightBlue: '#bfdbfe',
-  brightMagenta: '#f5d0fe',
-  brightCyan: '#a5f3fc',
-  brightWhite: '#fafafa'
+  background: '#ffffff',
+  foreground: '#1f2329',
+  cursor: '#111111',
+  cursorAccent: '#ffffff',
+  selectionBackground: 'rgba(9, 105, 218, 0.24)',
+  black: '#000000',
+  red: '#cd3131',
+  green: '#00bc00',
+  yellow: '#949800',
+  blue: '#0451a5',
+  magenta: '#bc05bc',
+  cyan: '#0598bc',
+  white: '#555555',
+  brightBlack: '#666666',
+  brightRed: '#cd3131',
+  brightGreen: '#14ce14',
+  brightYellow: '#b5ba00',
+  brightBlue: '#0451a5',
+  brightMagenta: '#bc05bc',
+  brightCyan: '#0598bc',
+  brightWhite: '#a5a5a5'
 }
 
 export default {
@@ -267,20 +267,14 @@ export default {
         this.loadingServer = false
       }
     },
-    async checkServer() {
+    // Re-read the server record (kept fresh by the backend heartbeat). Health
+    // checks are now a batch action on the server list.
+    async refreshServer() {
       if (!this.serverId) return
       this.checking = true
       try {
-        const res = await api.servers.check(this.serverId)
-        this.server.status = res.online ? 'online' : 'offline'
-        if (res.info) {
-          this.server.hostname = res.info.hostname || this.server.hostname
-          this.server.os = res.info.os || this.server.os
-          this.server.arch = res.info.arch || this.server.arch
-          this.server.agent_version = res.info.version || this.server.agent_version
-        }
-        if (res.online) this.$message.success('Agent 在线')
-        else this.$message.warning('Agent 不可达：' + (res.error || '无响应'))
+        this.server = await api.servers.get(this.serverId)
+        this.$message.success('状态已刷新')
       } catch (e) {
         this.$message.error(e.message)
       } finally {
@@ -523,10 +517,10 @@ export default {
   border-color: transparent;
 }
 
-/* The terminal keeps its own dark palette in both UI themes: that is what a
- * shell looks like, and it keeps ANSI colors readable. */
+/* The terminal keeps its own light palette in both UI themes, independent of
+ * the surrounding panel theme. */
 .xterm-host {
-  background: #050505;
+  background: #ffffff;
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 8px 10px;

@@ -4,7 +4,11 @@
 #   scripts/curl-examples.sh          # print the commands
 #   scripts/curl-examples.sh --run    # execute a read-only + echo demo
 #
-# Phase 1 has no authentication; these only work on an isolated network.
+# The backend requires a login cookie when auth.access_password is set:
+#   curl -c /tmp/lop.cookie -X POST http://127.0.0.1:8080/api/v1/auth/login \
+#     -H 'Content-Type: application/json' -d '{"password":"..."}'
+# then add -b /tmp/lop.cookie to every request below. The agent port has no
+# authentication at all; keep everything on an isolated network.
 # For self-signed HTTPS use `curl --cacert /path/ca.crt` — never default to -k.
 set -euo pipefail
 

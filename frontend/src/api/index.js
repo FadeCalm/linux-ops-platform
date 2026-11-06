@@ -2,6 +2,12 @@ import http from './http'
 import { API_BASE } from './base'
 
 export default {
+  auth: {
+    status: () => http.get('/auth/status'),
+    login: (password) => http.post('/auth/login', { password }),
+    logout: () => http.post('/auth/logout')
+  },
+
   health: () => http.get('/health'),
   limits: () => http.get('/config/limits'),
   overview: () => http.get('/stats/overview'),
@@ -12,8 +18,9 @@ export default {
     create: (data) => http.post('/servers', data),
     update: (id, data) => http.put(`/servers/${id}`, data),
     remove: (id) => http.delete(`/servers/${id}`),
-    check: (id) => http.post(`/servers/${id}/check`),
     agent: (id) => http.get(`/servers/${id}/agent`),
+    batchCheck: (ids) =>
+      http.post('/agents/check', { server_ids: ids }, { timeout: 300000 }),
     updateCheck: (id) => http.get(`/servers/${id}/agent/update/check`),
     applyUpdate: (id) => http.post(`/servers/${id}/agent/update`, null, { timeout: 0 }),
     batchUpdateCheck: (ids) =>

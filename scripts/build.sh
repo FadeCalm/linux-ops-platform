@@ -17,9 +17,14 @@ mkdir -p "$ROOT/bin"
 echo "==> building backend"
 (cd "$ROOT/backend" && go build -o "$ROOT/bin/backend" .)
 
-echo "==> building agent"
+# Default to the version hardcoded in agent/main.go so the binary and the
+# release package name never drift apart.
+AGENT_VERSION="${AGENT_VERSION:-$(sed -n 's/^var version = "\(.*\)"$/\1/p' "$ROOT/agent/main.go")}"
+AGENT_VERSION="${AGENT_VERSION:-0.0.0}"
+
+echo "==> building agent ($AGENT_VERSION)"
 (cd "$ROOT/agent" && CGO_ENABLED=0 go build \
-  -ldflags "-X main.version=${AGENT_VERSION:-0.1.0}" \
+  -ldflags "-X main.version=${AGENT_VERSION}" \
   -o "$ROOT/bin/agent" .)
 
 if [[ "$SKIP_FRONTEND" == "0" ]]; then

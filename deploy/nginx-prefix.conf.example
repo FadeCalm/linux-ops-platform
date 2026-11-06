@@ -21,7 +21,8 @@
 # API requests go to /ops-server/. Replace the prefixes/paths to match your
 # ingress. Install as /etc/nginx/conf.d/linux-ops.conf and reload.
 #
-# WARNING: phase 1 has NO authentication. Isolated management network only.
+# WARNING: access is gated by one shared password (ACCESS_PASSWORD), not real
+# authentication, and the link is plain HTTP. Isolated management network only.
 # Do NOT expose this to the internet.
 
 server {

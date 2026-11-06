@@ -1,8 +1,10 @@
 # Optional reverse proxy for the management UI.
 #
-# WARNING: phase 1 has NO authentication. Only use this on an isolated
-# management network, bind it to a private address, and restrict access with a
-# firewall/security group. Do NOT expose it to the internet.
+# WARNING: access is gated by one shared password (ACCESS_PASSWORD in
+# /etc/linux-ops/backend.env), which is not real authentication, and the link is
+# plain HTTP. Only use this on an isolated management network, bind it to a
+# private address, and restrict access with a firewall/security group. Do NOT
+# expose it to the internet.
 #
 # Install to /etc/nginx/conf.d/linux-ops.conf (or sites-available) and reload.
 # The WebSocket location MUST forward Upgrade/Connection or live output breaks.

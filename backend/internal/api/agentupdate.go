@@ -97,8 +97,8 @@ func (h *Handlers) batchServers(c *gin.Context) ([]models.Server, bool) {
 
 // runBatch executes fn for every server with bounded concurrency and returns
 // results in the same order as servers.
-func runBatch(servers []models.Server, fn func(models.Server) updateItem) []updateItem {
-	results := make([]updateItem, len(servers))
+func runBatch[T any](servers []models.Server, fn func(models.Server) T) []T {
+	results := make([]T, len(servers))
 	sem := make(chan struct{}, 4)
 	var wg sync.WaitGroup
 	for i, srv := range servers {

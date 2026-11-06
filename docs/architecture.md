@@ -1,7 +1,8 @@
-# Linux 集中运维平台 — 架构设计（M1–M3）
+# Linux 集中运维平台 — 架构设计
 
-> 本文是 spec 要求的 M0 架构交付物，描述当前已实现范围（M1–M3 核心闭环）的
-> 组件、通信方向、数据模型、状态机与可靠性策略，并给出 M4/M6 的演进路径。
+> 本文描述当前已实现范围的组件、通信方向、数据模型、状态机与可靠性策略，
+> 并保留后续里程碑（M5/M6/M7/M8）的演进设计。已实现范围见
+> [overview.md §4](overview.md#4-功能清单)。
 
 ## 1. 范围
 
@@ -13,16 +14,22 @@
 - 任务状态机：取消、超时、失败、未知、后端重启恢复
 - 日志落盘 + 分段索引；REST 回放与下载
 - 任务历史、`anonymous` 审计
-- 前端：概览、服务器、命令执行、任务历史
+- 交互式终端（PTY + WebSocket + xterm.js）
+- 文件管理（浏览、编辑、上传、下载、重命名、删除）
+- Agent 自更新（MinIO 制品桶扫描、SHA256 校验、原地重启）
+- 统一访问口令登录（单一口令，非多用户认证）
+- 前端：登录、概览、服务器、命令执行、文件、终端、任务历史
 
-明确不包含（按 spec §11 / 阶段划分）：
+明确不包含：
 
-- 登录、RBAC、JWT、API Token、Agent 认证、mTLS、命令审批
-- 交互式终端（M4）、命令模板库（M5）、Agent 包管理与升级（M6）、MinIO 大日志（M6）
+- 多用户、RBAC、JWT、API Token、Agent 认证、mTLS、命令审批、审计防篡改
+- 命令模板库（M5）、MinIO 大日志（M6）、高可用（M7）
 
 ## 2. 安全边界（重要）
 
-本阶段 **没有任何认证与授权**。因此：
+平台有**统一访问口令**（`auth.access_password`），但这不是真正的认证与授权：
+口令是全局共享的，没有用户身份、权限模型或操作人区分；后端到 Agent、浏览器到
+后端的链路都是明文 HTTP。因此：
 
 - 后端默认监听 `127.0.0.1:8080`，Agent 默认监听 `127.0.0.1:19090`
 - 跨机使用时，运维必须显式把监听地址改为**内网地址**，并用防火墙/安全组
@@ -79,7 +86,8 @@ flowchart LR
 - `servers.agent_version`、`hostname`、`os`、`arch`、`last_heartbeat_at`
 - `agents` 表（与 servers 1:1）
 
-手动 `POST /servers/{id}/check` 使用同一路径，便于排障。
+手动 `POST /agents/check`（body `{server_ids:[...]}`）复用同一条探测路径，
+一次刷新多台服务器，便于批量排障。
 
 ### 4.3 游标拉取日志
 
@@ -135,14 +143,15 @@ Agent 返回从 `X`/`Y` 开始的增量（base64）与新的游标。后端：
 
 ### 4.6 日志存储位置
 
-M1–M3 使用本地文件 + MySQL 索引：
+当前使用本地文件 + MySQL 索引：
 
 ```
 {log_dir}/{parentTaskID}/{targetID}/stdout.log
 {log_dir}/{parentTaskID}/{targetID}/stderr.log
 ```
 
-MinIO 已在 docker-compose 中预置但不参与读写，见 §9.2 的升级与回滚方案。
+MinIO 不承载任务日志；它当前只用于存放 Agent 发布包（自更新源，见 §9.2）。
+大日志方案仍是 §9.2 的设计目标，尚未实现。
 
 ## 5. 数据模型
 
@@ -361,18 +370,41 @@ sequenceDiagram
 
 ## 9. 后续里程碑设计
 
-### 9.1 M4 — 交互式终端（PTY）
+### 9.1 M4 — 交互式终端（PTY）【已实现】
 
-计划，不改变现有非交互路径：
+实现方式（不改变非交互路径）：
 
-- Agent 增加 `GET /api/v1/tasks/{id}/pty`（WebSocket）或独立 `pty` 端点
-- 使用纯 Go 的 `creack/pty`（保持 `CGO_ENABLED=0`）
-- 后端增加 PTY 代理 WebSocket，复用现有 `ws.Hub` 的 `seq` / 连接上限思路
-- 会话与任务分离：非交互任务继续走现有状态机；PTY 会话单独建表、单独审计
-- 前端引入 xterm.js，独立页面
-- 风险：PTY 会扩大攻击面；M8 前仍只允许隔离网络
+- Agent 提供 `GET /api/v1/ws/terminal` WebSocket，纯 Go 实现 PTY
+  （保持 `CGO_ENABLED=0`），支持窗口缩放、Ctrl+C
+- 后端在 `/api/v1/ws/terminal/:id` 做 WebSocket 代理，并限制并发会话数
+  （`websocket.max_terminal_sessions`）
+- 会话与任务分离：非交互任务继续走现有状态机；PTY 会话不落库
+- 前端使用 xterm.js，独立页面 `/terminal` 与 `/servers/:id/terminal`
+- 约束：空闲超时（默认 600s）、单会话最长时长（默认 3600s）、
+  `history_mode: memory`（默认不写 `~/.bash_history`）
+- 风险：PTY 扩大攻击面；仍只允许在隔离网络使用
 
-### 9.2 M6 — MinIO 大日志（升级与回滚）
+### 9.2 Agent 自更新【已实现】
+
+发布与发现：
+
+- 发布包命名约定 `linux-ops-agent-<版本>-linux-<架构>.tar.gz`，上传到
+  `update_base_url` 指向的 S3/MinIO 前缀即可，不依赖手工维护的 manifest。
+- Agent 用匿名 `ListObjectsV2`（分页）列出该前缀，按文件名正则筛选出与自身
+  `GOARCH` 匹配的版本，取高于当前版本的最大值；`manifest.json` 若存在则一并
+  参考，取两者中较高版本，并可继承 notes 与 sha256。
+- 校验和优先级：manifest → `SHA256SUMS` → 无（默认放行，
+  `update_require_checksum: true` 时拒绝）。
+
+安装与重启：
+
+1. 下载 tarball → 校验 sha256 → 解包出 `agent` 可执行文件；
+2. 旧文件备份为 `agent.old`，新文件原子替换 `os.Executable()`；
+3. `syscall.Exec` 原地重启，PID 与日志重定向保持不变。
+
+约束：升级前要求没有正在执行的任务（否则 409）；备份文件用于手工回滚。
+
+### 9.3 M6 — MinIO 大日志（计划）
 
 **升级**：
 
@@ -396,7 +428,7 @@ sequenceDiagram
 **风险**：MinIO 不可用会阻塞日志写入。升级时要求日志写入失败不阻塞任务执行，
 只记录错误并保留游标（下次重试），避免因为存储故障导致任务误判。
 
-### 9.3 M5 — 命令模板库
+### 9.4 M5 — 命令模板库（计划）
 
 - 新表 `command_templates`、`command_template_versions`
 - 模板渲染在**后端**完成，Agent 永远只收到最终命令
@@ -407,7 +439,7 @@ sequenceDiagram
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| 无认证 | 任何能访问端口的人都能执行任意命令 | 仅隔离网络；默认 127.0.0.1；防火墙限制；M8 前不对外 |
+| 口令共享且明文传输 | 知道口令或抓到 Cookie 的人能执行任意命令 | 统一口令仅作访问门槛；隔离网络；默认 127.0.0.1；防火墙限制；M8 前不对外 |
 | Agent 以普通用户运行 | 部分运维命令失败 | 显式 sudoers 条目；不推荐 root 运行 |
 | Agent 内存保存任务 | Agent 重启后历史丢失 | 后端保守标 `UNKNOWN`；日志已落盘；不重复执行 |
 | WS 环形缓冲有限 | 超长输出重连时可能丢帧 | 前端回退到 REST 日志接口；下载完整文件 |
@@ -425,9 +457,9 @@ sequenceDiagram
 | M1 | 三端工程、部署、健康检查 | 三端可构建；后端能列出 Agent 状态 | 已完成（待 Linux 实测） |
 | M2 | 单机真实执行闭环 | 前端提交命令，实时看到 stdout/stderr 与退出码 | 已完成（待 Linux 实测） |
 | M3 | 批量、状态机、取消/超时、恢复 | 多机执行、取消、超时、后端重启恢复、重复任务不重复执行 | 已完成（待 Linux 实测） |
-| M4 | 交互式终端 | xterm + PTY，会话审计 | 未开始 |
+| M4 | 交互式终端 | xterm + PTY，会话审计 | 已完成（真实主机验证） |
 | M5 | 命令模板库 | 模板 CRUD + 版本 + 渲染 | 未开始 |
-| M6 | MinIO 大日志 + Agent 包升级 | 大日志读写、升级/回滚演练 | 未开始 |
+| M6 | MinIO 大日志 + Agent 包升级 | 大日志读写、升级/回滚演练 | Agent 升级已完成；大日志未开始 |
 | M7 | 高可用与容量 | 多后端、对象存储、容量测试 | 未开始 |
 | M8 | 安全加固 | 认证、RBAC、mTLS、审批、审计防篡改 | 未开始 |
 

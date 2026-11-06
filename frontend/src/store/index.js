@@ -7,7 +7,8 @@ Vue.use(Vuex)
 export default new Vuex.Store({
   state: {
     limits: null,
-    backendOnline: true
+    backendOnline: true,
+    authRequired: false
   },
   mutations: {
     setLimits(state, limits) {
@@ -15,6 +16,9 @@ export default new Vuex.Store({
     },
     setBackendOnline(state, online) {
       state.backendOnline = online
+    },
+    setAuthRequired(state, required) {
+      state.authRequired = required
     }
   },
   actions: {

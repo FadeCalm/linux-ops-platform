@@ -1,11 +1,11 @@
 <template>
-  <div class="app-shell">
+  <div v-if="!isPublicRoute" class="app-shell">
     <header class="topbar">
       <div class="brand">
         <div class="brand-mark">L</div>
         <div class="brand-text">
-          <span class="brand-title">Linux 集中运维平台</span>
-          <span class="brand-sub">Centralized Ops · Phase 1 · No Auth</span>
+          <span class="brand-title">集中运维平台</span>
+          <span class="brand-sub">Centralized Ops · Phase 1 · Password Gate</span>
         </div>
       </div>
       <nav class="top-nav">
@@ -28,6 +28,12 @@
             <span>{{ theme === 'dark' ? '浅色' : '深色' }}</span>
           </button>
         </el-tooltip>
+        <el-tooltip v-if="authRequired" content="退出登录" placement="bottom">
+          <button class="theme-toggle" type="button" @click="logout">
+            <i class="el-icon-switch-button"></i>
+            <span>退出</span>
+          </button>
+        </el-tooltip>
       </div>
     </header>
 
@@ -48,7 +54,7 @@
         <div class="side-note">
           <div class="side-note-title"><i class="el-icon-warning-outline"></i> 隔离网络</div>
           <div class="side-note-text">
-            本版本无身份认证，仅限受控内网联调，禁止暴露公网。正式生产前须完成安全加固。
+            本版本使用统一访问口令，并非多用户身份认证；仅限受控内网，禁止暴露公网。
           </div>
         </div>
       </aside>
@@ -62,9 +68,11 @@
       </main>
     </div>
   </div>
+  <router-view v-else />
 </template>
 
 <script>
+import api from '@/api'
 import { applyTheme, getTheme } from '@/utils/theme'
 
 export default {
@@ -83,6 +91,12 @@ export default {
     }
   },
   computed: {
+    isPublicRoute() {
+      return !!(this.$route.meta && this.$route.meta.public)
+    },
+    authRequired() {
+      return this.$store.state.authRequired
+    },
     backendOnline() {
       return this.$store.state.backendOnline
     },
@@ -104,12 +118,28 @@ export default {
     toggleTheme() {
       this.theme = this.theme === 'dark' ? 'light' : 'dark'
       applyTheme(this.theme)
+    },
+    refreshLimits() {
+      this.$store.dispatch('loadLimits').catch(() => {})
+    },
+    async logout() {
+      try {
+        await api.auth.logout()
+      } catch (e) {
+        // Session already invalid; still go back to the login page.
+      }
+      this.$router.replace('/login')
+    }
+  },
+  watch: {
+    isPublicRoute(publicRoute) {
+      if (!publicRoute) this.refreshLimits()
     }
   },
   created() {
-    this.$store.dispatch('loadLimits').catch(() => {})
+    if (!this.isPublicRoute) this.refreshLimits()
     this.timer = setInterval(() => {
-      this.$store.dispatch('loadLimits').catch(() => {})
+      if (!this.isPublicRoute) this.refreshLimits()
     }, 15000)
   },
   beforeDestroy() {

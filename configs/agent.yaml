@@ -3,7 +3,8 @@
 # SECURITY: listen_addr defaults to 127.0.0.1 so the agent is not exposed by
 # accident. For a backend on another host, set it to the host's management
 # interface (e.g. 10.0.0.11) and restrict access with firewall/security groups.
-# Never bind it to a public address. Phase 1 has no agent authentication.
+# Never bind it to a public address: the agent itself has no authentication,
+# so restrict port 19090 to the backend host with firewall/security groups.
 
 listen_addr: "127.0.0.1"
 listen_port: 19090

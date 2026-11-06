@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"linux-ops-platform/backend/internal/models"
 
@@ -68,8 +70,10 @@ func (h *Handlers) CreateServer(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "invalid body: "+err.Error())
 		return
 	}
-	if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.IP) == "" {
-		fail(c, http.StatusBadRequest, "name and ip are required")
+	ip := strings.TrimSpace(req.IP)
+	name := strings.TrimSpace(req.Name)
+	if ip == "" {
+		fail(c, http.StatusBadRequest, "ip is required")
 		return
 	}
 	if req.AgentPort == 0 {
@@ -79,9 +83,17 @@ func (h *Handlers) CreateServer(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "invalid agent_port")
 		return
 	}
+	// The name is optional. When omitted, register the server under its IP and
+	// probe the agent once; a reachable agent reports its hostname, which then
+	// becomes the server name.
+	autoName := name == ""
 	srv := models.Server{
-		Name: req.Name, IP: req.IP, AgentPort: req.AgentPort,
+		Name: name, IP: ip, AgentPort: req.AgentPort,
 		GroupID: req.GroupID, Status: models.StatusUnknownAgent,
+	}
+	if autoName {
+		srv.Name = ip
+		srv.Status = models.StatusOffline
 	}
 	tags, err := h.resolveTags(c, req.Tags)
 	if err != nil {
@@ -95,7 +107,16 @@ func (h *Handlers) CreateServer(c *gin.Context) {
 	if len(tags) > 0 {
 		h.db.Model(&srv).Association("Tags").Replace(tags)
 	}
-	h.audit("server.create", "server", strconv.FormatInt(srv.ID, 10), req.Name+" "+req.IP)
+	if autoName {
+		if info, err := h.sched.CheckServer(c.Request.Context(), &srv); err == nil {
+			if host := strings.TrimSpace(info.Hostname); host != "" && host != ip {
+				if err := h.db.Model(&srv).Update("name", host).Error; err == nil {
+					srv.Name = host
+				}
+			}
+		}
+	}
+	h.audit("server.create", "server", strconv.FormatInt(srv.ID, 10), srv.Name+" "+ip)
 	h.db.Preload("Tags").First(&srv, srv.ID)
 	ok(c, srv)
 }
@@ -177,22 +198,48 @@ func (h *Handlers) DeleteServer(c *gin.Context) {
 	ok(c, gin.H{"deleted": true})
 }
 
-func (h *Handlers) CheckServer(c *gin.Context) {
-	id, okID := parseID(c)
-	if !okID {
+type checkItem struct {
+	ServerID  int64  `json:"server_id"`
+	Name      string `json:"name"`
+	IP        string `json:"ip"`
+	AgentPort int    `json:"agent_port"`
+	Online    bool   `json:"online"`
+	Hostname  string `json:"hostname,omitempty"`
+	OS        string `json:"os,omitempty"`
+	Arch      string `json:"arch,omitempty"`
+	Version   string `json:"version,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// BatchCheckServers probes many agents at once and returns each result. The
+// scheduler also persists status/hostname/version, so the list reflects the
+// fresh state after a batch check.
+func (h *Handlers) BatchCheckServers(c *gin.Context) {
+	servers, okIDs := h.batchServers(c)
+	if !okIDs {
 		return
 	}
-	var srv models.Server
-	if err := h.db.First(&srv, id).Error; err != nil {
-		fail(c, http.StatusNotFound, "server not found")
-		return
-	}
-	info, err := h.sched.CheckServer(c.Request.Context(), &srv)
-	if err != nil {
-		ok(c, gin.H{"online": false, "error": err.Error()})
-		return
-	}
-	ok(c, gin.H{"online": true, "info": info})
+	// Each probe has its own 5s timeout; allow enough wall-clock for 200
+	// servers at the batch concurrency.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
+	defer cancel()
+	results := runBatch(servers, func(srv models.Server) checkItem {
+		item := checkItem{
+			ServerID: srv.ID, Name: srv.Name, IP: srv.IP, AgentPort: srv.AgentPort,
+		}
+		info, err := h.sched.CheckServer(ctx, &srv)
+		if err != nil {
+			item.Error = err.Error()
+			return item
+		}
+		item.Online = true
+		item.Hostname = info.Hostname
+		item.OS = info.OS
+		item.Arch = info.Arch
+		item.Version = info.Version
+		return item
+	})
+	ok(c, gin.H{"items": results})
 }
 
 func (h *Handlers) GetAgent(c *gin.Context) {

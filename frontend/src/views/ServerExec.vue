@@ -21,7 +21,7 @@
         </div>
       </div>
       <div class="hero-actions">
-        <el-button size="mini" icon="el-icon-refresh" :loading="checking" @click="checkServer">检查状态</el-button>
+        <el-button size="mini" icon="el-icon-refresh" :loading="checking" @click="refreshServer">刷新状态</el-button>
         <el-button size="mini" icon="el-icon-connection" @click="goTerminal">交互终端</el-button>
         <el-button size="mini" icon="el-icon-folder-opened" @click="goFiles">文件管理</el-button>
         <el-button size="mini" icon="el-icon-document" @click="goHistory">任务历史</el-button>
@@ -226,20 +226,14 @@ export default {
         this.loadingServer = false
       }
     },
-    async checkServer() {
+    // Re-read the server record (kept fresh by the backend heartbeat). Health
+    // checks are now a batch action on the server list.
+    async refreshServer() {
       if (!this.serverId) return
       this.checking = true
       try {
-        const res = await api.servers.check(this.serverId)
-        this.server.status = res.online ? 'online' : 'offline'
-        if (res.info) {
-          this.server.hostname = res.info.hostname || this.server.hostname
-          this.server.os = res.info.os || this.server.os
-          this.server.arch = res.info.arch || this.server.arch
-          this.server.agent_version = res.info.version || this.server.agent_version
-        }
-        if (res.online) this.$message.success('Agent 在线')
-        else this.$message.warning('Agent 不可达：' + (res.error || '无响应'))
+        this.server = await api.servers.get(this.serverId)
+        this.$message.success('状态已刷新')
       } catch (e) {
         this.$message.error(e.message)
       } finally {

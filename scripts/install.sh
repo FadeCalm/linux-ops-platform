@@ -7,9 +7,11 @@
 # Requirements: Go 1.22+, Node 18+ (for the frontend build), Docker + Compose
 # (unless --skip-compose and you point DB_DSN at an existing MySQL).
 #
-# SECURITY: this phase has no authentication. By default the backend binds to
-# 127.0.0.1. Pass --lan-ip <private-ip> to expose it on a management network,
-# and restrict that port with firewall/security-group rules to the admin subnet.
+# SECURITY: access is gated by one shared password (ACCESS_PASSWORD in
+# deploy/.env, or generated here). This is not real authentication. By default
+# the backend binds to 127.0.0.1. Pass --lan-ip <private-ip> to expose it on a
+# management network, and restrict that port with firewall/security-group rules
+# to the admin subnet.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -99,6 +101,21 @@ if [[ -z "$DB_PASSWORD_VALUE" ]]; then
   DB_PASSWORD_VALUE="$(openssl rand -hex 16)"
 fi
 
+# Access password for the UI/API. Prefer deploy/.env so it survives reinstalls;
+# otherwise generate one and print it once at the end.
+ACCESS_PASSWORD_VALUE="${ACCESS_PASSWORD:-}"
+if [[ -z "$ACCESS_PASSWORD_VALUE" && -f "$ROOT/deploy/.env" ]]; then
+  ACCESS_PASSWORD_VALUE="$(grep -E '^ACCESS_PASSWORD=' "$ROOT/deploy/.env" | head -1 | cut -d= -f2-)"
+  ACCESS_PASSWORD_VALUE="${ACCESS_PASSWORD_VALUE%\"}"; ACCESS_PASSWORD_VALUE="${ACCESS_PASSWORD_VALUE#\"}"
+  ACCESS_PASSWORD_VALUE="${ACCESS_PASSWORD_VALUE%\'}"; ACCESS_PASSWORD_VALUE="${ACCESS_PASSWORD_VALUE#\'}"
+fi
+ACCESS_PASSWORD_GENERATED=0
+if [[ -z "$ACCESS_PASSWORD_VALUE" ]]; then
+  command -v openssl >/dev/null 2>&1 || die "set ACCESS_PASSWORD in deploy/.env (openssl not found to generate one)"
+  ACCESS_PASSWORD_VALUE="$(openssl rand -hex 12)"
+  ACCESS_PASSWORD_GENERATED=1
+fi
+
 BIND_ADDR="127.0.0.1:8080"
 if [[ -n "$LAN_IP" ]]; then
   BIND_ADDR="${LAN_IP}:8080"
@@ -111,6 +128,7 @@ DB_PASSWORD=${DB_PASSWORD_VALUE}
 LOG_DIR=${DATA_DIR}/logs
 FRONTEND_DIR=${INSTALL_DIR}/frontend
 LISTEN_ADDR=${BIND_ADDR}
+ACCESS_PASSWORD=${ACCESS_PASSWORD_VALUE}
 EOF
 chmod 600 "$CONF_DIR/backend.env"
 umask 022
@@ -151,8 +169,16 @@ else
   echo "  journalctl -u linux-ops-backend -n 100 --no-pager"
 fi
 echo
+if [[ "$ACCESS_PASSWORD_GENERATED" == "1" ]]; then
+  echo "Generated access password (also in $CONF_DIR/backend.env):"
+  echo "  ${ACCESS_PASSWORD_VALUE}"
+  echo "Change it by editing ACCESS_PASSWORD in $CONF_DIR/backend.env and restarting the backend."
+else
+  echo "Access password: from deploy/.env (written to $CONF_DIR/backend.env)."
+fi
+echo
 echo "Agent listens on 127.0.0.1:19090 (config: $CONF_DIR/agent.yaml)."
 echo "Smoke test:  $INSTALL_DIR/tests/smoke.sh"
 echo
-echo "REMINDER: phase 1 has NO authentication. Keep it on an isolated network."
-echo "Do not expose this service to the internet."
+echo "REMINDER: the access password is a single shared gate, not real authentication."
+echo "Keep the service on an isolated network and do not expose it to the internet."

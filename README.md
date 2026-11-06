@@ -1,23 +1,25 @@
-# Linux 集中运维平台（M1–M3 核心闭环）
+# Linux 集中运维平台
 
-一个真实可运行的 Linux 集中运维平台：管理服务器、向一台或多台主机下发命令，
+一个可运行的 Linux 集中运维平台：管理服务器、向一台或多台主机下发命令，
 实时查看 stdout/stderr、退出码与耗时，支持取消、超时、断线重放、后端重启恢复，
-并持久化任务历史与日志。
+并持久化任务历史与日志；附带文件管理、交互式终端（PTY）和 Agent 在线升级。
 
 技术栈：
 
 - 前端：Vue 2.7 + Element UI 2 + Vue Router 3 + Vuex 3 + Axios（Vite 构建，黑/白主题可手动切换）
 - 管理后端：Go 1.22 + Gin + GORM
 - Agent：Go 1.22 纯标准库 HTTP，`os/exec` + `/bin/bash -c`，进程组隔离
-- 存储：MySQL 8；任务日志落本地文件；MinIO 已预置但 M1–M3 不参与读写
+- 存储：MySQL 8；任务日志落本地文件；MinIO 存放 Agent 发布包（自更新源）
 
 ---
 
 ## ⚠️ 安全警告（务必阅读）
 
-**第一阶段没有任何认证与授权。** 没有登录、RBAC、JWT、API Token、Agent 认证、
-mTLS 或命令审批。任何能访问 8080 / 19090 端口的人都可以在受管主机上执行任意命令。
+**只有统一访问口令，不是真正的认证与授权。** 没有多用户账号、RBAC、JWT、
+API Token、Agent 认证、mTLS 或命令审批。知道口令的任何人都可以在受管主机上
+执行任意命令；口令和会话 Cookie 走明文 HTTP，内网可被抓包。
 
+- 口令配置项：`auth.access_password`（或环境变量 `ACCESS_PASSWORD`），留空即关闭
 - 默认只监听 `127.0.0.1`
 - 跨机使用必须绑定**内网地址**，并用防火墙/安全组限制到管理网段
 - **严禁暴露到公网**
@@ -31,12 +33,14 @@ mTLS 或命令审批。任何能访问 8080 / 19090 端口的人都可以在受�
 
 | 模块 | 能力 |
 |---|---|
+| 登录 | 统一访问口令、12 小时会话、登录失败限流、退出 |
 | 概览 | 服务器总数/在线/离线、Agent 版本分布、近期任务、成功率 |
-| 服务器管理 | 增删改查、分组、标签、搜索、健康检查、Agent 信息 |
+| 服务器管理 | 增删改查、名称留空自动取主机名、分组、标签、搜索、批量健康检查、Agent 信息 |
 | 命令执行 | 多机选择、命令/工作目录/超时、实时 stdout/stderr、逐机标签页、取消/重试/下载 |
 | 单机执行 | 点击主机进入独立页面：快捷命令、实时输出、取消/重试、最近任务 |
 | 文件管理 | 目录浏览/切换、新建、编辑保存（并发冲突检测）、分片上传、下载（Range 断点）、重命名、递归删除 |
-| Agent 升级 | 页面单台/批量检查与升级：从 MinIO 拉取、SHA256 校验、原地重启、保留 `agent.old` |
+| 交互终端 | xterm.js + PTY，支持 `cd`/`vim`/`top`/`Ctrl+C`/窗口缩放，空闲与最长时长限制 |
+| Agent 升级 | 页面单台/批量检查与升级：扫描 MinIO 桶按文件名发现新版本、SHA256 校验、原地重启、保留 `agent.old` |
 | 任务历史 | 状态/服务器/时间筛选、分页、详情、日志回放、取消/重试/下载 |
 | 可靠性 | 幂等键、进程组终止、超时、后端重启恢复、WebSocket 断线重放 |
 | 审计 | 任务与资源操作记录（anonymous） |
@@ -67,12 +71,16 @@ backend/      Go 管理后端（独立 go.mod）
 agent/        Go Agent（独立 go.mod，纯 Go，可交叉编译）
 frontend/     Vue 2.7 + Element UI（Vite）
 database/     schema.sql + seed.sql
-configs/      backend.yaml / agent.yaml 样例（不含密钥）
-deploy/       docker-compose.yml（MySQL/MinIO）、systemd units、.env.example
-scripts/      build.sh / install.sh / uninstall.sh / curl-examples.sh
+configs/      backend.yaml / agent.yaml 模板（不含密钥）；local.yaml 本机配置（gitignore）
+deploy/       docker-compose.yml（MySQL/MinIO）、systemd units、nginx 示例、.env.example
+scripts/      build.sh / install.sh / uninstall.sh / agent-install.sh / curl-examples.sh
 tests/        smoke.sh（真实端到端冒烟）
-docs/         架构、API、部署、验证进度
+docs/         架构、API、部署、验证进度、目录与功能总览
+bin/          构建产物与发布包（gitignore）：二进制、agent tar.gz、minio_upload.py
 ```
+
+每个目录与文件的职责、配置清单、功能清单见
+[docs/overview.md](docs/overview.md)。
 
 ## 快速开始（Linux 服务器）
 
@@ -84,7 +92,8 @@ cd linux-ops-platform
 # 1) 配置密码
 cd deploy
 cp .env.example .env
-# 编辑 .env，使用强密码（建议 openssl rand -hex 16）
+# 编辑 .env：MySQL 密码、MinIO 密码、ACCESS_PASSWORD（平台登录口令）
+# 建议用 openssl rand -hex 16 生成
 cd ..
 
 # 2) 一键安装（仅本机访问）
@@ -109,6 +118,10 @@ sudo bash tests/smoke.sh
 ```bash
 cp configs/backend.yaml configs/local.yaml   # 填写 mysql / minio 两段
 ```
+
+需要登录校验时，在 `configs/local.yaml` 的 `auth.access_password` 填一个口令
+（留空则跳过登录页）；启动时也可以用 `ACCESS_PASSWORD=... ./bin/backend ...`
+覆盖。
 
 ```bash
 # 1) 基础设施（二选一）
@@ -169,7 +182,8 @@ VITE_BASE_PATH=/ops-wxgzt/ VITE_API_BASE=/ops-server/api/v1 npm run build
 
 ## 文档
 
-- [docs/architecture.md](docs/architecture.md) — 架构、数据模型、状态机、恢复策略、M4/M6 演进
+- [docs/overview.md](docs/overview.md) — 目录结构、配置文件清单、功能清单
+- [docs/architecture.md](docs/architecture.md) — 架构、数据模型、状态机、恢复策略、演进设计
 - [docs/api.md](docs/api.md) — 后端 API、Agent API、WebSocket 协议
 - [docs/deployment.md](docs/deployment.md) — 安装、配置、安全清单、备份恢复、排障
 - [docs/progress.md](docs/progress.md) — 已验证 / 待验证清单
@@ -177,7 +191,7 @@ VITE_BASE_PATH=/ops-wxgzt/ VITE_API_BASE=/ops-server/api/v1 npm run build
 
 ## 已知限制
 
-- 无认证（设计如此，仅限隔离网络）
+- 仅有统一访问口令（`auth.access_password`），没有多用户账号与权限模型；仅限隔离网络
 - 无 TLS；链路为明文 HTTP
 - 输出为轮询拉取（默认 300ms），不是逐字节实时；M4 的 PTY 才提供真正实时交互
 - 日志按字节分块传输/读取，跨块边界的多字节 UTF-8 字符可能显示为替换符（`�`）
@@ -187,11 +201,11 @@ VITE_BASE_PATH=/ops-wxgzt/ VITE_API_BASE=/ops-server/api/v1 npm run build
 
 ## 路线图
 
-| 阶段 | 内容 |
-|---|---|
-| M1–M3 | 基础、单机执行、批量与可靠性（当前） |
-| M4 | 交互式终端（xterm.js + PTY） |
-| M5 | 命令模板库与版本 |
-| M6 | MinIO 大日志、Agent 包管理与升级 |
-| M7 | 高可用与容量 |
-| M8 | 认证、RBAC、mTLS、审批、审计防篡改 |
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| M1–M3 | 基础、单机执行、批量与可靠性 | 已完成 |
+| M4 | 交互式终端（xterm.js + PTY） | 已完成 |
+| M5 | 命令模板库与版本 | 未开始 |
+| M6 | MinIO 大日志、Agent 包管理与升级 | 升级已完成；大日志未开始 |
+| M7 | 高可用与容量 | 未开始 |
+| M8 | 认证、RBAC、mTLS、审批、审计防篡改 | 未开始（当前仅有统一访问口令） |

@@ -1,5 +1,6 @@
-// Command backend is the Linux ops platform management service. Phase 1 has
-// no authentication and must only run on an isolated management network.
+// Command backend is the Linux ops platform management service. Access can be
+// gated by a shared password (auth.access_password), but this is not real
+// authentication: run it only on an isolated management network.
 package main
 
 import (

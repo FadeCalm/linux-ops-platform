@@ -1,11 +1,13 @@
-# API 参考（M1–M3）
+# API 参考
 
 本平台有两套 HTTP API：
 
 - **管理后端**：浏览器与 curl 使用，前缀 `/api/v1`
 - **Agent**：仅由后端调用（也可用于排障），前缀 `/api/v1`，默认端口 `19090`
 
-> 第一阶段没有认证。请勿在公网暴露任何端口。所有示例都假设本机访问。
+> 管理后端在配置了 `auth.access_password` 时要求先登录（见 §2.0），其余接口
+> 均需携带会话 Cookie；Agent 的 19090 端口没有任何认证。请勿在公网暴露任何
+> 端口。所有示例都假设本机访问。
 
 ## 1. 通用约定
 
@@ -69,6 +71,30 @@
 
 ## 2. 后端 API
 
+### 2.0 登录（统一访问口令）
+
+配置了 `auth.access_password` 后，除 `GET /api/v1/health` 与下列三个接口外，
+所有 `/api/v1` 路径（含 WebSocket 握手）都要求携带登录 Cookie；未登录返回
+`401 {"code":401,"message":"请先登录"}`。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/v1/auth/status` | 返回 `{required, authenticated}`，前端每次路由跳转前调用 |
+| POST | `/api/v1/auth/login` | 请求体 `{password}`；成功时下发 `lop_session` Cookie |
+| POST | `/api/v1/auth/logout` | 清除 Cookie |
+
+```bash
+curl -c cookie.txt -X POST http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' -d '{"password":"你的密码"}'
+curl -b cookie.txt http://127.0.0.1:8080/api/v1/servers
+```
+
+- Cookie 是 HMAC-SHA256 签名的时间戳（`session_hours`，默认 12 小时），无服务端
+  会话存储；修改密码会让所有旧会话立即失效。
+- 登录失败按 IP 限流：每分钟 10 次，超出返回 `429`。
+- 退出登录只清除浏览器 Cookie；已泄露的 Token 在过期前仍可重放。
+- 这是单一口令的访问门槛，不是多用户身份认证，也没有审计意义上的操作人区分。
+
 ### 2.1 健康与概览
 
 | 方法 | 路径 | 说明 |
@@ -105,7 +131,7 @@
 | GET | `/api/v1/servers/{id}` | 详情（含 tags） |
 | PUT | `/api/v1/servers/{id}` | 更新 |
 | DELETE | `/api/v1/servers/{id}` | 删除（有活跃任务时 409） |
-| POST | `/api/v1/servers/{id}/check` | 即时健康检查 |
+| POST | `/api/v1/agents/check` | 批量健康检查，body `{server_ids:[...]}` |
 | GET | `/api/v1/servers/{id}/agent` | Agent 上报信息 |
 
 列表查询参数：
@@ -130,20 +156,26 @@
 }
 ```
 
-- `name`、`ip` 必填；`agent_port` 默认 `19090`
+- `ip` 必填；`agent_port` 默认 `19090`
+- `name` 新增时可省略：后端会探测一次 Agent，成功则用其上报的 `hostname`
+  作为名称，失败则暂用 `ip` 作为名称（服务器仍会创建，`status=offline`）
+- 更新时 `name`、`ip` 必填
 - `tags` 中的名字不存在时会自动创建
-- 新增服务器的初始 `status` 为 `unknown`
+- 新增服务器未探测时初始 `status` 为 `unknown`
 
-健康检查响应：
+批量健康检查响应（`server_ids` 最多 200 个，并发 4）：
 
 ```json
-{ "code": 0, "data": { "online": true, "info": {
-  "hostname": "web-01", "os": "linux", "arch": "amd64",
-  "version": "0.1.0", "uptime_sec": 120, "running_tasks": 0, "max_concurrent": 8
-} } }
+{ "code": 0, "data": { "items": [
+  { "server_id": 2, "name": "web-01", "ip": "10.0.0.11", "agent_port": 19090,
+    "online": true, "hostname": "web-01", "os": "linux", "arch": "amd64",
+    "version": "0.1.7" },
+  { "server_id": 3, "name": "db-01", "ip": "10.0.0.12", "agent_port": 19090,
+    "online": false, "error": "dial tcp 10.0.0.12:19090: connect: connection refused" }
+] } }
 ```
 
-Agent 不可达时仍返回 200：`{"online": false, "error": "..."}`。
+检查结果会同步写回服务器状态、主机名、系统、架构与 Agent 版本。
 
 ### 2.3 分组与标签
 
@@ -446,6 +478,24 @@ ws://<backend>/api/v1/ws/tasks/{taskId}
 - 服务端读超时 60 秒，收到 pong 后重置
 - 环形缓冲只保留最近 `replay_buffer_len` 帧；更早内容请用 REST 日志接口
 
+### 3.5 终端 WebSocket（PTY）
+
+```
+ws://<backend>/api/v1/ws/terminal/{serverId}
+```
+
+- 后端校验服务器存在与并发上限（`websocket.max_terminal_sessions`，超出返回
+  HTTP 503），升级后代理到 Agent 的 `ws://<agent>/api/v1/ws/terminal`；
+  浏览器不直连 Agent。
+- **二进制帧**：双向原始终端字节（按键与输出）。
+- **文本帧**：控制消息。
+  - 客户端 → 服务端：`{"type":"resize","cols":120,"rows":30}`
+  - 服务端 → 客户端（连接失败时）：`{"type":"error","message":"..."}`
+- 会话限制由 Agent 执行：空闲 `terminal.idle_timeout_sec`（默认 600s）、
+  最长 `terminal.max_duration_sec`（默认 3600s）、并发 `terminal.max_sessions`
+  （默认 4）。`history_mode: memory` 时不会写入受管用户的 `~/.bash_history`。
+- 审计记录 `terminal.open` / `terminal.close`。
+
 ---
 
 ## 4. Agent API
@@ -463,7 +513,7 @@ Agent 只被后端调用，也可用 curl 排障。Agent 返回裸 JSON（无 `c
 |---|---|---|
 | GET | `/api/v1/health` | `{"status":"ok","uptime_sec":123}` |
 | GET | `/api/v1/info` | hostname/os/arch/version/running_tasks/max_concurrent |
-| GET | `/api/v1/version` | `{"version":"0.1.0"}` |
+| GET | `/api/v1/version` | `{"version":"0.1.7"}` |
 | POST | `/api/v1/tasks` | 提交任务（按 `task_id` 幂等） |
 | GET | `/api/v1/tasks/{id}` | 查询状态 |
 | GET | `/api/v1/tasks/{id}/logs` | 游标增量日志 |
@@ -471,6 +521,7 @@ Agent 只被后端调用，也可用 curl 排障。Agent 返回裸 JSON（无 `c
 | GET | `/api/v1/fs/list` `stat` `read` `download` | 浏览 / 读取 / 下载 |
 | PUT | `/api/v1/fs/write` `upload` | 原子保存 / 分片上传 |
 | POST | `/api/v1/fs/op` | mkdir / touch / rename / chmod / delete |
+| GET | `/api/v1/ws/terminal` | WebSocket：PTY 会话（只由后端代理，不直连浏览器） |
 | GET | `/api/v1/update/check` | 扫描桶（+ manifest）对比当前版本 |
 | POST | `/api/v1/update` | 下载、校验并替换自身二进制 |
 

@@ -72,7 +72,7 @@
 | 16 | systemd 单元 | `systemctl enable/start` 正常，重启后自启 |
 | 17 | `install.sh` 全流程 | 在干净服务器上从零安装成功 |
 | 18 | 前端完整交互 | 服务器 CRUD、标签、健康检查、历史筛选、日志查看 |
-| 19 | MinIO | M6 才使用；当前只需确认容器健康，不验证读写 |
+| 19 | MinIO | 用于 Agent 发布包（自更新源）；任务大日志未启用 |
 
 ## 三、Linux 验收步骤
 
@@ -297,3 +297,40 @@ MySQL 与 MinIO 连接信息统一到 `configs/local.yaml`（含口令，已加�
 - 文件名扫描的固有风险：桶里出现一个命名正确但损坏/错误的包会被当作候选；
   建议发布只用 `bin/minio_upload.py`，并保留 `SHA256SUMS`。
 - 仍未实现「后台定时发现 + 列表角标」，检测仍由页面手动触发。
+
+## 九、访问口令（进入首页前登录）
+
+实现（后端 `backend/internal/api/auth.go`、`config.AuthConfig`）：
+
+- 配置项 `auth.access_password`（空 = 关闭）与 `auth.session_hours`（默认 12），
+  可用环境变量 `ACCESS_PASSWORD` / `SESSION_HOURS` 覆盖。
+- `POST /api/v1/auth/login` 恒定时间比较口令，成功后下发 HttpOnly 的
+  `lop_session` Cookie；Cookie 内容为 `过期时间.nonce.HMAC-SHA256`，密钥由
+  口令派生，因此无服务端会话表，改口令即让所有旧会话失效。
+- 除 `/health` 与三个 `auth/*` 接口外，`/api/v1` 全部路由（含 `/ws/*` 握手）
+  走 `requireAuth` 中间件；失败率按 IP 限流（10 次/分钟，超出 429）。
+- 前端新增 `/login` 路由与全屏登录页，路由守卫在每次跳转前调用
+  `/auth/status`；任意接口返回 401 时由 axios 拦截器跳回登录页并保留
+  `redirect`；顶栏在后端声明 `required=true` 时显示「退出」。
+
+验证（本机后端 127.0.0.1:8080，口令 `changeme`）：
+
+| # | 场景 | 结果 |
+|---|---|---|
+| 1 | 未登录 `GET /api/v1/auth/status` | `{required:true, authenticated:false}` |
+| 2 | 未登录 `GET /api/v1/servers` | 401 |
+| 3 | 错误口令登录 | 401「密码错误」 |
+| 4 | 正确口令登录 | 200，Set-Cookie `lop_session` |
+| 5 | 携带 Cookie 访问 `/servers`、`/auth/status` | 200，`authenticated:true` |
+| 6 | 伪造/篡改 Cookie | 401 |
+| 7 | 连续 11 次错误口令 | 前 10 次 401，第 11 次 429 |
+| 8 | 登出 | Set-Cookie 过期，浏览器 Cookie 被清除 |
+| 9 | `GET /api/v1/health` | 200（保持公开，便于探活） |
+
+未覆盖 / 边界：
+
+- 链路仍是明文 HTTP：口令和 Cookie 在内网可被抓包，本功能只是访问门槛，
+  不替代 TLS 或真正的认证。
+- 退出登录不服务端吊销；Token 在过期前若已泄露仍可重放。
+- 哈希路由下直接打开 `#/login` 会先请求 `/auth/status`，后端不可达时停留在
+  登录页并提示后端离线。
