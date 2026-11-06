@@ -21,6 +21,8 @@ type updateItem struct {
 	Latest    string `json:"latest"`
 	Available bool   `json:"available"`
 	Updated   bool   `json:"updated"`
+	Source    string `json:"source,omitempty"`
+	Verified  bool   `json:"verified"`
 	Error     string `json:"error,omitempty"`
 }
 
@@ -40,6 +42,7 @@ func (h *Handlers) AgentUpdateCheck(c *gin.Context) {
 		"server_id": srv.ID, "name": srv.Name,
 		"current": res.Current, "latest": res.Latest,
 		"available": res.Available, "notes": res.Notes,
+		"source": res.Source, "verified": res.Verified,
 	})
 }
 
@@ -130,6 +133,8 @@ func (h *Handlers) BatchAgentUpdateCheck(c *gin.Context) {
 		item.Current = res.Current
 		item.Latest = res.Latest
 		item.Available = res.Available
+		item.Source = res.Source
+		item.Verified = res.Verified
 		return item
 	})
 	ok(c, gin.H{"items": results})
@@ -154,6 +159,8 @@ func (h *Handlers) BatchAgentUpdate(c *gin.Context) {
 		item.Current = res.From
 		item.Latest = res.To
 		item.Updated = res.Updated
+		item.Source = res.Source
+		item.Verified = res.Verified
 		if res.Updated {
 			h.audit("agent.update", "server", strconv.FormatInt(srv.ID, 10),
 				res.From+" -> "+res.To)

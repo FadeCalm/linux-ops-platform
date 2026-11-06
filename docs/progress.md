@@ -259,3 +259,41 @@ MySQL 与 MinIO 连接信息统一到 `configs/local.yaml`（含口令，已加�
 - **Windows Git Bash/MSYS 会把 `VITE_BASE_PATH=/ops-wxgzt/` 改写为
   `C:/Program Files/Git/ops-wxgzt/`**，导致白屏；应去掉前导斜杠或使用
   `frontend/.env.local`（已实测复现并给出规避方式）。
+
+## 八、2026-11-06 Agent 0.1.5：按桶扫描发现新版本（免手工 manifest）
+
+背景：此前每次发版都要手改 `manifest.json` 的版本与 SHA256，容易漏改或写错，
+漏改时全平台都检测不到新版本。0.1.5 改为以桶内文件名为准。
+
+实现（`agent/internal/update`）：
+
+- `resolve()` 同时尝试两条来源，取版本较高者：
+  - `ListObjectsV2`（匿名，`prefix=linux-ops-agent-`）解析
+    `linux-ops-agent-<x.y.z>-linux-<GOARCH>.tar.gz`；
+  - `manifest.json`（可选，提供 notes 与 sha256）。
+- 校验和优先级：manifest → `SHA256SUMS` → 无（默认放行，
+  `update_require_checksum: true` 时拒绝）。
+- `/api/v1/update/check` 新增 `source`（manifest / listing / manifest+listing）
+  与 `verified`，平台 UI 在结果表里显示「发现来源」和「已校验/未校验」。
+- 桶策略由 `bin/minio_upload.py` 统一设置为匿名 `s3:GetObject` + `s3:ListBucket`；
+  脚本根据 tar.gz 文件名自动生成 `manifest.json` 与 `SHA256SUMS`。
+
+验证（真实主机 47.99.2.212，server id=2）：
+
+| # | 场景 | 结果 |
+|---|---|---|
+| 1 | 0.1.4 → 0.1.5 页面升级（旧 manifest 路径） | 成功，`/info` 返回 0.1.5 |
+| 2 | 桶内出现 0.1.6、manifest 仍停在 0.1.5 | 检查返回 `latest=0.1.6, available=true, source=listing, verified=false` |
+| 3 | 仅给 0.1.6 补 `SHA256SUMS` 条目 | `verified` 变为 true，仍为 `source=listing` |
+| 4 | 删除 0.1.6、恢复 SHA256SUMS | 回到 `latest=0.1.5, available=false` |
+| 5 | **删除 manifest.json** 后检查 | 仍返回 `latest=0.1.5, source=listing, verified=true` |
+
+未验证 / 边界：
+
+- 场景 2/3/5 只验证了「发现」，未用 listing 来源真正执行一次升级下载；下载与
+  解包路径与 manifest 模式共用（`download(file)` + `extractBinary`）。
+- 匿名 ListBucket 使桶内容可被枚举；隔离网络内可接受，公网部署应改为私有桶
+  + 签名或走内网制品服务。
+- 文件名扫描的固有风险：桶里出现一个命名正确但损坏/错误的包会被当作候选；
+  建议发布只用 `bin/minio_upload.py`，并保留 `SHA256SUMS`。
+- 仍未实现「后台定时发现 + 列表角标」，检测仍由页面手动触发。

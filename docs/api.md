@@ -335,8 +335,16 @@ GET /api/v1/audit?action=task.create&resource=task&page=1&page_size=20
 | POST | `/api/v1/agents/update/check` | 批量检查，body `{server_ids:[...]}` |
 | POST | `/api/v1/agents/update` | 批量升级，body `{server_ids:[...]}` |
 
-升级流程：Agent 从 `update_base_url` 拉取 `manifest.json` → 下载 tarball →
-校验 SHA256 → 替换自身二进制（旧文件保留为 `agent.old`）→ `exec` 原地重启。
+升级流程：Agent 以匿名 `ListObjectsV2` 扫描 `update_base_url` 指向的桶，按
+`linux-ops-agent-<version>-linux-<arch>.tar.gz` 取高于自身的最大版本；若
+`manifest.json` 存在则一并参考，取两者中较高者，并优先采用 manifest 中的
+`notes`/`sha256`。校验和缺失时再查 `SHA256SUMS`；仍缺失则默认跳过校验
+（`update_require_checksum: true` 可强制要求）。随后下载 tarball → 校验
+SHA256 → 替换自身二进制（旧文件保留为 `agent.old`）→ `exec` 原地重启。
+
+因此发布新版本只需把命名正确的 tar.gz 放进桶里，不必手改 manifest；
+桶须允许匿名 `s3:ListBucket` + `s3:GetObject`。`/update/check` 额外返回
+`source`（`manifest` / `listing` / `manifest+listing`）与 `verified`。
 升级期间 Agent 会短暂不可用；有任务运行时 Agent 返回 `409`。
 
 ## 3. WebSocket 协议
@@ -463,7 +471,7 @@ Agent 只被后端调用，也可用 curl 排障。Agent 返回裸 JSON（无 `c
 | GET | `/api/v1/fs/list` `stat` `read` `download` | 浏览 / 读取 / 下载 |
 | PUT | `/api/v1/fs/write` `upload` | 原子保存 / 分片上传 |
 | POST | `/api/v1/fs/op` | mkdir / touch / rename / chmod / delete |
-| GET | `/api/v1/update/check` | 对比 manifest 与当前版本 |
+| GET | `/api/v1/update/check` | 扫描桶（+ manifest）对比当前版本 |
 | POST | `/api/v1/update` | 下载、校验并替换自身二进制 |
 
 ### 4.2 提交任务

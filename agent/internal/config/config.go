@@ -45,9 +45,15 @@ type Config struct {
 	MaxTimeoutMS     int64          `yaml:"max_timeout_ms"`
 	TaskRetentionSec int            `yaml:"task_retention_sec"`
 	Terminal         TerminalConfig `yaml:"terminal"`
-	// UpdateBaseURL points at the artifact prefix that serves manifest.json
-	// and the agent tarball. Empty disables self-update.
+	// UpdateBaseURL points at the artifact prefix that serves the agent
+	// tarballs (and optionally manifest.json / SHA256SUMS). Empty disables
+	// self-update. The bucket is scanned with ListObjectsV2, so builds are
+	// discovered by filename: linux-ops-agent-<version>-linux-<arch>.tar.gz.
 	UpdateBaseURL string `yaml:"update_base_url"`
+	// UpdateRequireChecksum refuses to install a release whose sha256 is not
+	// published in manifest.json or SHA256SUMS. Off by default so that
+	// dropping a correctly named tarball into the bucket is enough.
+	UpdateRequireChecksum bool `yaml:"update_require_checksum"`
 }
 
 func Default() *Config {

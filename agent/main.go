@@ -20,7 +20,7 @@ import (
 // version can be overridden at build time:
 //
 //	go build -ldflags "-X main.version=1.2.3"
-var version = "0.1.4"
+var version = "0.1.7"
 
 func main() {
 	cfgPath := flag.String("config", "configs/agent.yaml", "path to config file")

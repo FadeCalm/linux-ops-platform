@@ -40,7 +40,7 @@ func New(cfg *config.Config, engine *exec.Engine, version string) *Server {
 			MaxDurationSec: cfg.Terminal.MaxDurationSec,
 			HistoryMode:    cfg.Terminal.HistoryMode,
 		}),
-		updater: update.New(cfg.UpdateBaseURL, version),
+		updater: update.New(cfg.UpdateBaseURL, version, cfg.UpdateRequireChecksum),
 		version: version,
 		started: time.Now(),
 	}

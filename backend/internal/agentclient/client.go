@@ -323,6 +323,8 @@ type UpdateCheckResponse struct {
 	Notes     string `json:"notes"`
 	File      string `json:"file"`
 	SHA256    string `json:"sha256"`
+	Source    string `json:"source"`
+	Verified  bool   `json:"verified"`
 }
 
 type UpdateApplyResponse struct {
@@ -331,6 +333,8 @@ type UpdateApplyResponse struct {
 	To         string `json:"to"`
 	Restarting bool   `json:"restarting"`
 	Reason     string `json:"reason"`
+	Source     string `json:"source"`
+	Verified   bool   `json:"verified"`
 }
 
 func (c *Client) CheckUpdate(ctx context.Context, addr string) (*UpdateCheckResponse, error) {

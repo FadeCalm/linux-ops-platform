@@ -36,6 +36,12 @@ terminal:
   # platform's own terminal.open/terminal.close audit are unaffected.
   history_mode: "memory"
 
-# Self-update: the agent pulls manifest.json + tarball from this prefix when the
-# management UI triggers an upgrade. Set to "" to disable.
+# Self-update. The agent scans this S3/MinIO prefix (anonymous ListBucket) for
+# files named linux-ops-agent-<version>-linux-<arch>.tar.gz and offers the
+# highest version above its own. Uploading a correctly named tarball is enough;
+# manifest.json and SHA256SUMS are optional and only add notes/checksums.
+# Set to "" to disable. Requires anonymous s3:ListBucket + s3:GetObject.
 update_base_url: "http://47.114.120.205:9000/linux-ops-agent"
+# Refuse builds that have no published sha256. Off by default so a bare tarball
+# upload works; turn on for stricter integrity checking.
+update_require_checksum: false

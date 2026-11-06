@@ -16,19 +16,24 @@
         </el-select>
         <el-button icon="el-icon-search" @click="reload">查询</el-button>
         <div class="spacer"></div>
-        <el-button
-          icon="el-icon-refresh"
-          :disabled="!selected.length"
-          :loading="checkingUpdates"
-          @click="checkUpdates"
-        >检查更新</el-button>
-        <el-button
-          type="warning"
-          icon="el-icon-upload2"
-          :disabled="!selected.length"
-          :loading="upgrading"
-          @click="batchUpgrade"
-        >批量升级{{ selected.length ? ` (${selected.length})` : '' }}</el-button>
+        <el-tooltip content="未勾选时检查当前页全部在线服务器" placement="top">
+          <el-button
+            icon="el-icon-refresh"
+            :loading="checkingUpdates"
+            @click="checkUpdates"
+          >检查更新</el-button>
+        </el-tooltip>
+        <el-tooltip :disabled="selected.length > 0" content="勾选服务器，或先检查更新后直接升级全部可更新项" placement="top">
+          <span>
+            <el-button
+              type="warning"
+              icon="el-icon-upload2"
+              :disabled="!selected.length && !updatableCount"
+              :loading="upgrading"
+              @click="batchUpgrade"
+            >批量升级{{ batchLabel }}</el-button>
+          </span>
+        </el-tooltip>
         <el-button icon="el-icon-collection" @click="manageVisible = true">分组 / 标签</el-button>
         <el-button type="primary" icon="el-icon-plus" @click="openCreate">新增服务器</el-button>
       </div>
@@ -76,17 +81,24 @@
         <el-table-column label="最后心跳" width="170">
           <template slot-scope="{ row }">{{ formatTime(row.last_heartbeat_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="380" fixed="right">
+        <el-table-column label="操作" width="420" fixed="right">
           <template slot-scope="{ row }">
             <el-button type="text" @click="openExec(row)">执行</el-button>
             <el-button type="text" @click="openTerminal(row)">终端</el-button>
             <el-button type="text" :loading="checking[row.id]" @click="checkServer(row)">健康检查</el-button>
-            <el-button
+            <el-tooltip
               v-if="row.status === 'online'"
-              type="text"
-              :loading="updating[row.id]"
-              @click="upgradeServer(row)"
-            >升级</el-button>
+              :disabled="!hasUpdate(row)"
+              :content="updateTip(row)"
+              placement="top"
+            >
+              <el-button
+                type="text"
+                :class="{ 'upgrade-hot': hasUpdate(row) }"
+                :loading="updating[row.id]"
+                @click="upgradeServer(row)"
+              >{{ hasUpdate(row) ? `升级 ${rowUpdate(row).latest}` : '升级' }}</el-button>
+            </el-tooltip>
             <el-button type="text" @click="openEdit(row)">编辑</el-button>
             <el-button type="text" style="color: var(--danger)" @click="removeServer(row)">删除</el-button>
           </template>
@@ -183,16 +195,28 @@
     </el-dialog>
 
     <!-- agent update results -->
-    <el-dialog :title="updateTitle" :visible.sync="updateVisible" width="720px">
+    <el-dialog :title="updateTitle" :visible.sync="updateVisible" width="820px">
       <el-table :data="updateResults" border empty-text="暂无结果">
         <el-table-column prop="name" label="服务器" min-width="150" />
-        <el-table-column label="当前版本" width="120">
+        <el-table-column label="当前版本" width="110">
           <template slot-scope="{ row }"><span class="mono">{{ row.current || '-' }}</span></template>
         </el-table-column>
-        <el-table-column label="最新版本" width="120">
+        <el-table-column label="最新版本" width="110">
           <template slot-scope="{ row }"><span class="mono">{{ row.latest || '-' }}</span></template>
         </el-table-column>
-        <el-table-column label="结果" min-width="240">
+        <el-table-column label="发现来源" width="160">
+          <template slot-scope="{ row }">
+            <span v-if="row.error" class="muted">-</span>
+            <span v-else>
+              <span class="muted">{{ sourceText(row.source) }}</span>
+              <el-tag v-if="row.verified" size="mini" type="success" style="margin-left: 6px">已校验</el-tag>
+              <el-tooltip v-else-if="row.latest" content="该版本未发布 sha256，升级时不做完整性校验">
+                <el-tag size="mini" type="warning" style="margin-left: 6px">未校验</el-tag>
+              </el-tooltip>
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="结果" min-width="220">
           <template slot-scope="{ row }">
             <span v-if="row.error" style="color: var(--danger)">{{ row.error }}</span>
             <span v-else-if="row.updated" style="color: var(--success)">已升级，Agent 正在重启</span>
@@ -236,10 +260,24 @@ export default {
       updateVisible: false,
       updateTitle: '',
       updateResults: [],
+      updates: {}, // server id -> { latest, available, verified, source, error }
+      autoCheck: true,
+      autoChecking: false,
+      lastAutoCheck: 0,
       manageVisible: false,
       manageTab: 'groups',
       newGroup: { name: '', description: '' },
       newTag: ''
+    }
+  },
+  computed: {
+    updatableCount() {
+      return this.servers.filter((s) => this.hasUpdate(s)).length
+    },
+    batchLabel() {
+      if (this.selected.length) return ` (${this.selected.length})`
+      if (this.updatableCount) return ` (可更新 ${this.updatableCount})`
+      return ''
     }
   },
   methods: {
@@ -250,12 +288,73 @@ export default {
       const g = this.groups.find((x) => x.id === id)
       return g ? g.name : '-'
     },
+    sourceText(src) {
+      if (src === 'listing') return '桶内扫描'
+      if (src === 'manifest+listing') return '清单+扫描'
+      if (src === 'manifest') return '清单'
+      return '-'
+    },
+    rowUpdate(row) {
+      return this.updates[row.id] || null
+    },
+    hasUpdate(row) {
+      const u = this.updates[row.id]
+      return !!(u && u.available)
+    },
+    updateTip(row) {
+      const u = this.updates[row.id]
+      if (!u || !u.available) return ''
+      const src = this.sourceText(u.source)
+      const extra = src === '-' ? '' : ` · ${src}`
+      return `可升级到 v${u.latest}（${u.verified ? '已校验' : '未校验'}${extra}）`
+    },
+    applyCheckItems(items) {
+      const next = { ...this.updates }
+      for (const it of items || []) {
+        if (!it.server_id) continue
+        // The check asks the agent itself, so it is fresher than the
+        // heartbeat-backed version column.
+        if (!it.error && it.current) {
+          const srv = this.servers.find((s) => s.id === it.server_id)
+          if (srv) this.$set(srv, 'agent_version', it.current)
+        }
+        next[it.server_id] = it.error
+          ? { available: false, error: it.error }
+          : {
+              latest: it.latest,
+              available: it.available,
+              verified: it.verified,
+              source: it.source,
+              error: ''
+            }
+      }
+      this.updates = next
+    },
+    // Auto-check the current page so the "升级" highlight shows up without
+    // clicking anything. Throttled and silent; manual checks still work.
+    async autoCheckUpdates() {
+      if (!this.autoCheck || this.autoChecking || this.upgrading || this.checkingUpdates) return
+      if (Date.now() - this.lastAutoCheck < 60000) return
+      const ids = this.servers.filter((s) => s.status === 'online').map((s) => s.id)
+      if (!ids.length) return
+      this.lastAutoCheck = Date.now()
+      this.autoChecking = true
+      try {
+        const res = await api.servers.batchUpdateCheck(ids)
+        this.applyCheckItems(res.items)
+      } catch (e) {
+        // Silent: the 检查更新 button remains available for explicit feedback.
+      } finally {
+        this.autoChecking = false
+      }
+    },
     async load() {
       this.loading = true
       try {
         const data = await api.servers.list(this.query)
         this.servers = data.items || []
         this.total = data.total || 0
+        this.autoCheckUpdates()
       } catch (e) {
         this.$message.error(e.message)
       } finally {
@@ -357,17 +456,23 @@ export default {
       this.selected = rows
     },
     async checkUpdates() {
-      if (!this.selected.length) {
-        this.$message.warning('请先勾选服务器')
+      let ids = this.selected.map((s) => s.id)
+      if (!ids.length) {
+        ids = this.servers.filter((s) => s.status === 'online').map((s) => s.id)
+      }
+      if (!ids.length) {
+        this.$message.warning('请先勾选服务器，或确保当前页存在在线服务器')
         return
       }
       this.checkingUpdates = true
       try {
-        const res = await api.servers.batchUpdateCheck(this.selected.map((s) => s.id))
+        const res = await api.servers.batchUpdateCheck(ids)
         this.updateResults = res.items || []
-        this.updateTitle = 'Agent 更新检查'
+        this.applyCheckItems(this.updateResults)
+        this.updateTitle = this.selected.length
+          ? `Agent 更新检查（${ids.length} 台）`
+          : `Agent 更新检查（当前页 ${ids.length} 台在线）`
         this.updateVisible = true
-        this.load()
       } catch (e) {
         this.$message.error(e.message)
       } finally {
@@ -375,13 +480,21 @@ export default {
       }
     },
     async batchUpgrade() {
-      if (!this.selected.length) {
-        this.$message.warning('请先勾选服务器')
-        return
+      let targets = this.selected.slice()
+      let prompt
+      if (targets.length) {
+        prompt = `将对 ${targets.length} 台服务器执行 Agent 升级`
+      } else {
+        targets = this.servers.filter((s) => this.hasUpdate(s))
+        if (!targets.length) {
+          this.$message.warning('没有可升级的服务器，请先勾选或执行检查更新')
+          return
+        }
+        prompt = `将升级当前页 ${targets.length} 台有可用更新的服务器`
       }
       try {
         await this.$confirm(
-          `将对 ${this.selected.length} 台服务器执行 Agent 升级，升级过程中 Agent 会重启，确定继续？`,
+          `${prompt}，升级过程中 Agent 会重启，确定继续？`,
           '批量升级 Agent',
           { type: 'warning', confirmButtonText: '开始升级', cancelButtonText: '取消' }
         )
@@ -390,14 +503,28 @@ export default {
       }
       this.upgrading = true
       try {
-        const res = await api.servers.batchUpdate(this.selected.map((s) => s.id))
+        const res = await api.servers.batchUpdate(targets.map((s) => s.id))
         this.updateResults = res.items || []
         this.updateTitle = 'Agent 批量升级结果'
         this.updateVisible = true
+        const next = { ...this.updates }
+        const upgraded = {}
+        for (const it of this.updateResults) {
+          if (it.updated) {
+            delete next[it.server_id]
+            upgraded[it.server_id] = it.latest
+          }
+        }
+        this.updates = next
+        // Optimistically show the new version; the heartbeat (20s) will
+        // refresh it for real, so reload after that rather than racing it.
+        for (const s of this.servers) {
+          if (upgraded[s.id]) this.$set(s, 'agent_version', upgraded[s.id])
+        }
         const failed = this.updateResults.filter((i) => !i.ok).length
         if (failed) this.$message.warning(`${failed} 台服务器升级失败，请查看结果`)
         else this.$message.success('升级指令已全部执行')
-        setTimeout(() => this.load(), 1500)
+        setTimeout(() => this.load(), 22000)
       } catch (e) {
         this.$message.error(e.message)
       } finally {
@@ -417,7 +544,13 @@ export default {
       this.$set(this.updating, row.id, true)
       try {
         const res = await api.servers.applyUpdate(row.id)
+        const next = { ...this.updates }
+        delete next[row.id]
+        this.updates = next
         if (res.updated) {
+          // The list's version column comes from the heartbeat (every 20s), so
+          // show the new version right away and reload only after it lands.
+          this.$set(row, 'agent_version', res.to)
           this.$notify.success({
             title: '已升级',
             message: `${res.from} → ${res.to}，Agent 正在重启`
@@ -425,7 +558,7 @@ export default {
         } else {
           this.$notify.info({ title: '无需升级', message: res.reason || '已是最新版本' })
         }
-        setTimeout(() => this.load(), 1500)
+        setTimeout(() => this.load(), 22000)
       } catch (e) {
         this.$message.error(e.message)
       } finally {
@@ -483,3 +616,17 @@ export default {
   }
 }
 </script>
+
+<style scoped>
+/* Highlight the row action when a newer agent build is known to exist. */
+.upgrade-hot {
+  color: #b45309 !important;
+  background: #fef3c7;
+  border-radius: 10px;
+  padding: 0 8px;
+  font-weight: 600;
+}
+.upgrade-hot:hover {
+  background: #fde68a;
+}
+</style>
