@@ -1,0 +1,29 @@
+# build outputs
+/bin/
+/frontend/dist/
+/frontend/node_modules/
+
+# runtime data (task logs, local agent logs)
+/data/
+*.log
+
+# secrets — never commit
+/deploy/.env
+*.env
+!/deploy/.env.example
+/configs/local.yaml
+/frontend/.env
+/frontend/.env.local
+/frontend/.env.*.local
+
+# Go
+*.exe
+*.test
+*.prof
+*.out
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

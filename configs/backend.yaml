@@ -1,0 +1,51 @@
+# Management backend configuration (template, safe to commit).
+# For local/dev runs put real values in `configs/local.yaml` (gitignored) and
+# start with: ./bin/backend.exe -config configs/local.yaml
+# Secrets can also come from environment variables:
+#   DB_PASSWORD, DB_DSN (optional full DSN), LISTEN_ADDR, LOG_DIR, FRONTEND_DIR
+#
+# Phase 1 has no authentication. Bind to a private management interface only.
+
+listen_addr: "127.0.0.1:8080"
+# Set to a concrete origin in production, e.g. "http://10.0.0.10".
+allow_origin: "*"
+# When the built frontend is deployed alongside the backend, point this at it.
+# Empty disables static serving.
+frontend_dir: ""
+
+log_dir: "./data/logs"
+
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "ops"
+  password: ""            # prefer DB_PASSWORD env var
+  dbname: "linux_ops"
+  dsn: ""                 # optional full DSN; overrides the fields above
+  max_open_conns: 20
+  max_idle_conns: 5
+  auto_migrate: true      # false only if you applied database/schema.sql manually
+  seed: true              # insert demo group/server when the servers table is empty
+
+# Object store for agent packages (also used by bin/minio_upload.py).
+# Leave secrets empty here; put real values in configs/local.yaml.
+minio:
+  endpoint: "http://127.0.0.1:9000"
+  access_key: ""
+  secret_key: ""
+  bucket: "linux-ops-agent"
+  update_base_url: "http://127.0.0.1:9000/linux-ops-agent"
+
+scheduler:
+  heartbeat_interval_sec: 20
+  dispatch_concurrency: 8
+  poll_interval_ms: 300
+  default_timeout_ms: 300000
+  max_timeout_ms: 3600000
+  max_script_bytes: 65536
+  max_output_bytes: 10485760
+  agent_request_timeout_sec: 10
+
+websocket:
+  max_connections: 200
+  replay_buffer_len: 2000

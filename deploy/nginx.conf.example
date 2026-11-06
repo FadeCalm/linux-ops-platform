@@ -1,0 +1,41 @@
+# Optional reverse proxy for the management UI.
+#
+# WARNING: phase 1 has NO authentication. Only use this on an isolated
+# management network, bind it to a private address, and restrict access with a
+# firewall/security group. Do NOT expose it to the internet.
+#
+# Install to /etc/nginx/conf.d/linux-ops.conf (or sites-available) and reload.
+# The WebSocket location MUST forward Upgrade/Connection or live output breaks.
+#
+# To mount everything under one prefix (e.g. /lops/) see
+# deploy/nginx-prefix.conf.example and build the frontend with
+# VITE_BASE_PATH=/lops/.
+
+server {
+    listen 10.0.0.10:80;          # use the private management address
+    server_name _;
+
+    # Restrict to the admin subnet at the network layer as well.
+    # allow 10.0.0.0/24;
+    # deny all;
+
+    client_max_body_size 4m;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /api/v1/ws/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}

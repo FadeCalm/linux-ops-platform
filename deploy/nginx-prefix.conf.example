@@ -1,0 +1,88 @@
+# Reverse proxy with custom prefixes:
+#   frontend  -> /ops-wxgzt/
+#   backend   -> /ops-server/  (proxied to the backend's /api/v1/...)
+#
+# Build the frontend with the SAME values (or put them in frontend/.env.local):
+#
+#   cd frontend
+#   VITE_BASE_PATH=/ops-wxgzt/ VITE_API_BASE=/ops-server/api/v1 npm run build
+#
+# The build lands in dist/ops-wxgzt/ (the prefix becomes a directory), e.g.
+#   dist/ops-wxgzt/index.html
+#   dist/ops-wxgzt/assets/...
+# Deploy the whole dist/ to /opt/linux-ops-platform/frontend/ and the paths
+# below line up without moving files around.
+#
+# Windows Git Bash/MSYS: omit the leading slash (VITE_BASE_PATH=ops-wxgzt
+# VITE_API_BASE=ops-server/api/v1) or use frontend/.env.local, because MSYS
+# rewrites values that look like POSIX paths.
+#
+# The two prefixes are independent: the frontend can live at /ops-wxgzt/ while
+# API requests go to /ops-server/. Replace the prefixes/paths to match your
+# ingress. Install as /etc/nginx/conf.d/linux-ops.conf and reload.
+#
+# WARNING: phase 1 has NO authentication. Isolated management network only.
+# Do NOT expose this to the internet.
+
+server {
+    listen 10.0.0.10:80;          # use the private management address
+    server_name _;
+
+    # allow 10.0.0.0/24;
+    # deny all;
+
+    client_max_body_size 4m;
+
+    # ---------- frontend: /ops-wxgzt/ ----------
+
+    location = /ops-wxgzt {
+        return 301 /ops-wxgzt/;
+    }
+
+    # Hashed build assets are immutable; index.html must always be revalidated.
+    # dist/ carries the prefix folder, hence .../frontend/ops-wxgzt/...
+    location /ops-wxgzt/assets/ {
+        alias /opt/linux-ops-platform/frontend/ops-wxgzt/assets/;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+
+    location = /ops-wxgzt/index.html {
+        alias /opt/linux-ops-platform/frontend/ops-wxgzt/index.html;
+        add_header Cache-Control "no-cache";
+    }
+
+    # Vue router uses hash mode (#/servers), so the only document URL is
+    # /ops-wxgzt/ — no history-mode fallback is required.
+    location /ops-wxgzt/ {
+        alias /opt/linux-ops-platform/frontend/ops-wxgzt/;
+        index index.html;
+    }
+
+    # ---------- backend: /ops-server/ ----------
+
+    # WebSocket: longest-prefix match wins, keep Upgrade/Connection headers.
+    location /ops-server/api/v1/ws/ {
+        proxy_pass http://127.0.0.1:8080/api/v1/ws/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    # REST: strip /ops-server/ and forward to the backend root, so
+    # /ops-server/api/v1/health -> http://127.0.0.1:8080/api/v1/health.
+    location /ops-server/ {
+        proxy_pass http://127.0.0.1:8080/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}

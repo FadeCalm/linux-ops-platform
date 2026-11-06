@@ -1,0 +1,49 @@
+# MySQL 8 + MinIO for the Linux ops platform.
+#
+#   cp deploy/.env.example deploy/.env   # then edit secrets
+#   cd deploy && docker compose up -d
+#
+# Both services bind to 127.0.0.1 only. MinIO is NOT used by M1-M3; it is
+# provisioned now for the M6 agent-package milestone.
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: linux-ops-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in deploy/.env}"
+      MYSQL_DATABASE: "${DB_NAME:-linux_ops}"
+      MYSQL_USER: "${DB_USER:-ops}"
+      MYSQL_PASSWORD: "${DB_PASSWORD:?set DB_PASSWORD in deploy/.env}"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+00:00
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  minio:
+    image: minio/minio:latest
+    container_name: linux-ops-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-opsminio}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in deploy/.env}"
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio-data:/data
+
+volumes:
+  mysql-data:
+  minio-data:

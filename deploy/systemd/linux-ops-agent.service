@@ -1,0 +1,26 @@
+[Unit]
+Description=Linux Ops Platform — Host Agent
+Documentation=file:///opt/linux-ops-platform/docs/architecture.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The agent runs as an unprivileged user by default. Privileged commands require
+# an explicit, narrow sudo policy configured by the operator — never grant
+# blanket NOPASSWD:ALL.
+User=linuxops
+Group=linuxops
+WorkingDirectory=/opt/linux-ops-platform
+EnvironmentFile=-/etc/linux-ops/agent.env
+ExecStart=/opt/linux-ops-platform/bin/agent -config /etc/linux-ops/agent.yaml
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

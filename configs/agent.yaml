@@ -1,0 +1,33 @@
+# Agent configuration.
+#
+# SECURITY: listen_addr defaults to 127.0.0.1 so the agent is not exposed by
+# accident. For a backend on another host, set it to the host's management
+# interface (e.g. 10.0.0.11) and restrict access with firewall/security groups.
+# Never bind it to a public address. Phase 1 has no agent authentication.
+
+listen_addr: "127.0.0.1"
+listen_port: 19090
+
+work_dir: "/tmp"
+log_dir: "./data/agent-logs"        # reserved for future on-disk agent logs
+
+max_concurrent: 8                    # concurrent command executions
+max_output_bytes: 10485760           # 10 MiB per stream, then truncated
+max_script_bytes: 1048576            # max command length accepted
+default_timeout_ms: 300000
+max_timeout_ms: 3600000
+task_retention_sec: 3600             # keep finished task records in memory this long
+
+# Interactive terminal (PTY). The shell runs as the agent's own user unless
+# user: "root" is set AND the agent itself runs as root; keep it non-root.
+terminal:
+  shell: "/bin/bash"
+  work_dir: "/"
+  user: ""                           # empty = agent user; "root" needs agent as root
+  max_sessions: 4                    # concurrent PTY sessions on this host
+  idle_timeout_sec: 600              # close a session idle this long (0 = off)
+  max_duration_sec: 3600             # hard cap per session (0 = off)
+
+# Self-update: the agent pulls manifest.json + tarball from this prefix when the
+# management UI triggers an upgrade. Set to "" to disable.
+update_base_url: "http://47.114.120.205:9000/linux-ops-agent"
