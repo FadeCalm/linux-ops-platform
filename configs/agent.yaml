@@ -27,6 +27,14 @@ terminal:
   max_sessions: 4                    # concurrent PTY sessions on this host
   idle_timeout_sec: 600              # close a session idle this long (0 = off)
   max_duration_sec: 3600             # hard cap per session (0 = off)
+  # Bash history for interactive sessions:
+  #   memory  - (default) history works inside the session but is never
+  #             persisted; the user's ~/.bash_history is not touched
+  #   inherit - behave like a normal login shell and let bash append to the
+  #             user's ~/.bash_history (keeps a local trail on the host)
+  # This only affects bash history. journald/auditd/process accounting and the
+  # platform's own terminal.open/terminal.close audit are unaffected.
+  history_mode: "memory"
 
 # Self-update: the agent pulls manifest.json + tarball from this prefix when the
 # management UI triggers an upgrade. Set to "" to disable.

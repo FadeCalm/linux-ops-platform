@@ -114,6 +114,12 @@ func (m *Manager) Serve(conn *websocket.Conn) error {
 
 	cmd := exec.Command(cfg.Shell)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	// "memory" keeps history usable inside the session but sends writes to
+	// /dev/null, so the target user's own ~/.bash_history is neither read,
+	// modified nor deleted. os/exec keeps the last duplicate key.
+	if cfg.HistoryMode == "memory" {
+		cmd.Env = append(cmd.Env, "HISTFILE=/dev/null")
+	}
 	cmd.Dir = cfg.WorkDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{}
 	if cfg.User == "root" {

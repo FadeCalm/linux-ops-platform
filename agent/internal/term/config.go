@@ -26,4 +26,12 @@ type Config struct {
 	// MaxDurationSec closes a session after this long in total, regardless of
 	// activity. Zero or negative disables the check.
 	MaxDurationSec int
+	// HistoryMode controls whether the interactive shell persists its command
+	// history to the target user's HISTFILE (usually ~/.bash_history).
+	//   "inherit" (default) - behave like a normal login shell; bash may
+	//                         append to the user's existing history file.
+	//   "memory"            - history works inside the session but nothing is
+	//                         persisted (HISTFILE=/dev/null). Existing history
+	//                         is never read, modified or deleted.
+	HistoryMode string
 }

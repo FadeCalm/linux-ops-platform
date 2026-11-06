@@ -27,6 +27,10 @@ type TerminalConfig struct {
 	IdleTimeoutSec int `yaml:"idle_timeout_sec"`
 	// MaxDurationSec closes a session after this long in total. 0 disables.
 	MaxDurationSec int `yaml:"max_duration_sec"`
+	// HistoryMode is "inherit" (default; bash may append to the user's
+	// ~/.bash_history) or "memory" (history only inside the session, never
+	// persisted). The user's existing history file is never modified.
+	HistoryMode string `yaml:"history_mode"`
 }
 
 type Config struct {
@@ -64,6 +68,10 @@ func Default() *Config {
 			MaxSessions:    4,
 			IdleTimeoutSec: 600,
 			MaxDurationSec: 3600,
+			// Keep interactive-session commands out of the target user's
+			// ~/.bash_history by default. Set "inherit" to behave like a
+			// normal login shell instead.
+			HistoryMode: "memory",
 		},
 		UpdateBaseURL: "http://47.114.120.205:9000/linux-ops-agent",
 	}
@@ -140,6 +148,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Terminal.MaxDurationSec < 0 {
 		c.Terminal.MaxDurationSec = 0
+	}
+	if c.Terminal.HistoryMode == "" {
+		c.Terminal.HistoryMode = "memory"
+	}
+	if c.Terminal.HistoryMode != "inherit" && c.Terminal.HistoryMode != "memory" {
+		return fmt.Errorf("terminal.history_mode must be \"inherit\" or \"memory\"")
 	}
 	if c.Terminal.User != "" && c.Terminal.User != "root" {
 		return fmt.Errorf("terminal.user must be empty or \"root\"")

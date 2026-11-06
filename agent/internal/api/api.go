@@ -38,6 +38,7 @@ func New(cfg *config.Config, engine *exec.Engine, version string) *Server {
 			MaxSessions:    cfg.Terminal.MaxSessions,
 			IdleTimeoutSec: cfg.Terminal.IdleTimeoutSec,
 			MaxDurationSec: cfg.Terminal.MaxDurationSec,
+			HistoryMode:    cfg.Terminal.HistoryMode,
 		}),
 		updater: update.New(cfg.UpdateBaseURL, version),
 		version: version,
