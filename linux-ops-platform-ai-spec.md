@@ -11,6 +11,8 @@
 
 **重要风险边界**：无认证的远程命令执行接口具有极高风险。第一阶段仅允许在受控、隔离的实验/管理网络内联调，禁止暴露公网或任何不受信任的网络。真正生产上线前必须补齐至少网络访问限制、Agent 身份认证、管理端访问控制与审计。不要把“无认证”误称为“生产安全”。不要提供绕过系统审计或隐藏执行痕迹的功能。
 
+> 补充（2026-11 修订）：§18 监控改为**后端主动拉取**，复用 Agent 现有 19090 端口（新增只读 GET 接口），不新增监听端口、不引入 Agent 认证/密钥/证书。整条链路继续沿用 §0/§4 的「内网隔离 + 不做身份认证」约束，不设例外。详见 §19。
+
 ## 1. 项目目标
 
 开发一个集中管理 Linux 主机的 Web 运维平台，支持：
@@ -86,7 +88,7 @@
 
 服务器字段：ID、名称、IP、Agent 端口、主机名、OS、架构、分组、标签、Agent 版本、状态、最后心跳时间、创建/更新时间。
 
-功能：新增/编辑/删除、搜索筛选、批量选择、健康检查、Agent 信息、心跳状态、离线提示、版本展示。需要明确心跳方式：可由 Agent 主动上报，也可由后端定时探测；第一版选一种主方案并说明网络条件。
+功能：新增/编辑/删除、搜索筛选、批量选择、健康检查、Agent 信息、心跳状态、离线提示、版本展示。心跳方式统一为后端定时探测（拉模式，见 §19）；监控快照拉取成功即视为心跳。
 
 Agent 要求：Go 单二进制、配置文件、systemd、日志轮转、优雅退出、受控并发、运行任务清理、Linux amd64/arm64、版本信息、健康接口。避免以 root 默认运行。
 
@@ -288,3 +290,1338 @@ PTY + xterm.js + WebSocket，支持 cd、top、vim、Ctrl+C、窗口调整、会
 ## 17. 现在开始执行的指令
 
 **请先执行 M0：检查当前项目和环境，输出完整架构方案、通信方向、数据库模型、API 草案、执行状态机、PTY 方案、MinIO 升级与回滚方案、分阶段任务清单。第一版明确不做任何身份认证，但须标注隔离环境限制和正式生产前的安全补齐要求。等我确认架构后，再逐阶段编写真实可运行的系统。**
+
+
+## 18. 新增功能：服务器监控与硬件健康（v2）
+
+基于已完成的功能，需要新增以下能力。
+
+一个类似 Node Exporter + Prometheus + Grafana 的轻量级服务器监控平台，同时增强物理服务器硬件监控能力，尤其是 SMART 磁盘健康、RAID 控制器自动发现、RAID 级别识别、阵列降级检测、故障硬盘槽位定位等。
+
+系统必须具备：
+
+Linux Go Agent 自动采集服务器指标，并在本地缓存最新快照。
+后端复用现有 19090 端口主动拉取指标，Agent 不主动外连。
+Go Server 集成到现有 agentclient/调度器中，实现集中拉取、存储、分析监控数据。
+Vue2 + Element UI Web 管理控制台。
+ECharts 实时与历史监控曲线。
+自动识别服务器厂商、型号、操作系统、硬件信息。
+自动识别 RAID 控制器并选择合适的采集方式。
+支持软件 RAID、硬件 RAID、ZFS、LVM RAID、HBA/JBOD。
+支持 SMART 硬盘健康与故障预警。
+支持告警、历史数据、主机管理、Agent 管理。
+支持 Linux x86_64 和 aarch64。
+支持长期稳定运行及生产部署。
+
+页面风格：
+简洁、现代、专业、有科技感。
+采用浅色为默认主题，预留深色模式。
+不要使用过度发光、渐变、大面积高饱和颜色或复杂装饰。
+
+核心设计要求
+后端主动拉取：复用 Agent 19090 端口，不新增监听端口。
+Server 不需要 SSH 到被监控服务器，只通过 Agent HTTP 接口取数。
+Agent 不主动外连监控中心，不需要注册、密钥或证书。
+支持多台服务器并发拉取（有界并发 + 错峰抖动 + 单机超时）。
+支持 gzip 压缩响应。
+拉取失败按退避重试；连续失败判定主机离线。
+Agent 本地保留短期环形缓冲（建议 10–15 分钟），供后端重启后补采。
+支持 Agent 版本管理（复用现有 /info 与在线升级）。
+Agent 心跳由成功拉取隐含，不单设心跳接口。
+支持 Agent 自身健康监控（采集器状态、耗时、内存）。
+
+三、Agent 基础信息采集
+
+3.1 操作系统
+
+采集：
+
+主机名
+
+Machine ID（使用哈希或内部标识）
+
+操作系统发行版
+
+操作系统版本
+
+Linux 内核版本
+
+CPU 架构
+
+系统启动时间
+
+系统运行时间
+
+Agent 版本
+
+Agent 启动时间
+
+优先读取：
+
+/etc/os-release
+/proc/uptime
+/proc/version
+/sys/class/dmi/id/
+
+3.2 服务器硬件信息
+
+采集：
+
+服务器厂商
+
+服务器型号
+
+BIOS 版本
+
+主板型号
+
+CPU 型号
+
+CPU 物理数量
+
+CPU 核心数量
+
+逻辑 CPU 数量
+
+NUMA 节点
+
+物理内存总量
+
+服务器序列号属于敏感资产信息，默认仅保存必要标识，并限制 Web 访问权限。
+
+五、CPU 监控
+
+采集：
+
+CPU 总使用率
+
+User
+
+System
+
+Idle
+
+IOWait
+
+IRQ
+
+SoftIRQ
+
+Steal
+
+每核心使用率
+
+Load 1/5/15
+
+上下文切换
+
+中断数量
+
+进程数量
+
+线程数量
+
+采集来源：
+
+/proc/stat
+/proc/loadavg
+/proc/cpuinfo
+
+要求：
+
+通过累计计数器差值计算使用率。
+
+正确处理 CPU 热插拔和计数器重置。
+
+支持 128 核及以上服务器。
+
+每核心指标允许单独开启或关闭。
+
+Web 展示实时使用率、历史曲线和 CPU 核心热力图。
+
+六、内存监控
+
+采集：
+
+MemTotal
+
+MemAvailable
+
+MemFree
+
+Buffers
+
+Cached
+
+SwapTotal
+
+SwapFree
+
+Dirty
+
+Writeback
+
+Active
+
+Inactive
+
+Slab
+
+CommitLimit
+
+Committed_AS
+
+内存使用率优先使用：
+
+(MemTotal - MemAvailable) / MemTotal * 100
+
+Web 展示：
+
+内存总量
+
+已使用内存
+
+可用内存
+
+Cache
+
+Swap
+
+内存使用率曲线
+
+七、磁盘 I/O 监控
+
+采集所有真实块设备。
+
+指标：
+
+读取 Bytes/s
+
+写入 Bytes/s
+
+Read IOPS
+
+Write IOPS
+
+平均读取延迟
+
+平均写入延迟
+
+I/O Busy Time
+
+Weighted I/O Time
+
+当前 In-flight I/O
+
+磁盘设备型号
+
+容量
+
+设备类型
+
+采集来源：
+
+/proc/diskstats
+/sys/block/
+
+要求：
+
+通过采样差值计算速率。
+
+使用实际采样时间计算。
+
+正确处理计数器重置。
+
+避免重复汇总物理盘、分区、dm、md 设备造成统计翻倍。
+
+支持 HDD、SSD、NVMe、RAID 虚拟磁盘。
+
+支持设备热插拔。
+
+支持设备筛选。
+
+磁盘 I/O 利用率必须明确说明是 busy time 估算，不能等同于设备性能饱和率。
+
+Web 曲线：
+
+读写 MB/s
+
+IOPS
+
+读写延迟
+
+I/O Busy
+
+队列情况
+
+八、文件系统容量
+
+采集：
+
+挂载点
+
+文件系统类型
+
+总容量
+
+已用容量
+
+可用容量
+
+使用率
+
+inode 总数
+
+inode 使用率
+
+只读状态
+
+支持：
+
+ext4
+
+xfs
+
+btrfs
+
+NFS
+
+HDFS 挂载目录（如果存在）
+
+其他 Linux 文件系统
+
+要求：
+
+过滤不必要的伪文件系统。
+
+不阻塞在失效的远程挂载点上。
+
+支持按挂载点配置排除规则。
+
+展示挂载点与底层设备关系。
+
+九、网络监控
+
+9.1 网卡
+
+采集每张网卡：
+
+名称
+
+MAC
+
+MTU
+
+链路状态
+
+速率
+
+双工模式
+
+RX Bytes/s
+
+TX Bytes/s
+
+RX Packets/s
+
+TX Packets/s
+
+RX Drops
+
+TX Drops
+
+RX Errors
+
+TX Errors
+
+支持：
+
+物理网卡
+
+Bond
+
+VLAN
+
+Bridge
+
+虚拟网卡
+
+避免物理网卡和 Bond 的流量重复汇总。
+
+9.2 Bond / LACP
+
+自动检测：
+
+/proc/net/bonding/
+
+采集：
+
+Bond 名称
+
+Bond 模式
+
+Slave 成员
+
+Active Slave
+
+MII Status
+
+链路速率
+
+LACP 状态
+
+成员链路异常
+
+9.3 TCP 连接
+
+采集：
+
+ESTABLISHED
+
+LISTEN
+
+TIME_WAIT
+
+CLOSE_WAIT
+
+SYN_SENT
+
+SYN_RECV
+
+FIN_WAIT
+
+TCP Retransmits
+
+TCP OutSegs
+
+TCP InSegs
+
+优先使用内核接口和 Netlink。
+
+不要每 5 秒启动一次 ss -ant 扫描所有连接。
+
+Web 展示：
+
+当前连接数
+
+TCP 状态分布
+
+历史连接曲线
+
+TCP 重传率
+
+网络收发趋势
+
+十、SMART 硬盘健康监控
+
+10.1 自动发现
+
+Agent 自动识别：
+
+SATA
+
+SAS
+
+NVMe
+
+RAID 控制器后面的物理盘
+
+HBA/JBOD 物理盘
+
+优先使用 sysfs 发现设备。
+
+根据设备类型选择 smartctl 采集参数。
+
+对于硬件 RAID 后面的磁盘，允许通过控制器工具获取设备映射，再使用适当的 smartctl 访问方式。
+
+10.2 采集指标
+
+磁盘型号
+
+序列号
+
+固件版本
+
+容量
+
+接口类型
+
+SMART 总体状态
+
+温度
+
+通电小时数
+
+重映射扇区
+
+待映射扇区
+
+不可纠正错误
+
+NVMe Percentage Used
+
+NVMe Available Spare
+
+NVMe Media Errors
+
+要求：
+
+优先解析 smartctl JSON 输出。
+
+兼容不同 smartctl 版本。
+
+不同接口使用不同指标映射。
+
+SMART 状态区分 Healthy、Warning、Failed、Unknown、Unsupported。
+
+不能因工具缺失而报告 Healthy。
+
+支持自定义 SMART 阈值。
+
+支持记录历史健康变化。
+
+十一、RAID 自动发现与自适应采集引擎
+
+这是整个系统的核心功能。
+
+模块名称：
+
+RAID Auto Discovery Engine
+
+11.1 自动识别目标
+
+Agent 启动后自动完成：
+
+识别服务器厂商。
+
+识别服务器型号。
+
+识别操作系统和 CPU 架构。
+
+扫描 PCI RAID/SAS/SATA/NVMe 控制器。
+
+识别 PCI Vendor ID、Device ID、Subsystem ID。
+
+识别内核驱动。
+
+检测软件 RAID。
+
+检测硬件 RAID。
+
+检测 ZFS 和 LVM RAID。
+
+检测 HBA/JBOD。
+
+匹配适配器。
+
+采集控制器、阵列、物理盘状态。
+
+不能仅根据服务器型号判断 RAID 类型。
+
+同一台服务器允许存在多个 RAID 控制器和多种存储技术。
+
+11.2 预置适配器
+
+至少设计以下适配器：
+
+适配器
+
+类型
+
+采集工具
+
+LinuxMDAdapter
+
+Linux 软件 RAID
+
+mdadm
+
+MegaRAIDAdapter
+
+LSI/Broadcom
+
+StorCLI
+
+DellPERCAdapter
+
+Dell PERC
+
+perccli / StorCLI
+
+HPESmartArrayAdapter
+
+HPE Smart Array
+
+ssacli
+
+AdaptecAdapter
+
+Microchip/Adaptec
+
+arcconf
+
+IntelVROCAdapter
+
+Intel VROC / IMSM
+
+mdadm / 厂商工具
+
+ZFSAdapter
+
+ZFS
+
+zpool
+
+LVMRAIDAdapter
+
+LVM RAID
+
+lvs
+
+HBAAdapter
+
+HBA/JBOD
+
+sysfs / smartctl
+
+注意：
+
+HBA/JBOD 不一定存在 RAID 阵列。
+
+不同适配器需要区分控制器、逻辑卷、存储池和物理磁盘。
+
+实际识别必须综合 PCI ID、驱动、控制器型号、工具检测结果及设备拓扑。
+
+支持：
+
+自动匹配
+
+多适配器并行发现
+
+工具版本检测
+
+工具路径配置
+
+架构兼容性检测
+
+规则版本管理
+
+未知控制器诊断
+
+11.3 RAID 指标
+
+控制器：
+
+厂商
+
+型号
+
+PCI 地址
+
+驱动
+
+固件版本
+
+控制器健康状态
+
+虚拟磁盘或阵列：
+
+RAID 级别
+
+阵列容量
+
+阵列状态
+
+物理盘数量
+
+重建进度
+
+热备状态
+
+物理磁盘：
+
+Enclosure
+
+Slot
+
+Device ID
+
+序列号
+
+型号
+
+容量
+
+介质类型
+
+Online / Failed / Rebuilding / Hot Spare
+
+SMART 状态
+
+温度
+
+11.4 状态标准化
+
+统一状态：
+
+Optimal
+Degraded
+Failed
+Rebuilding
+Unknown
+Unsupported
+
+同时保留厂商原始状态。
+
+采集状态单独定义：
+
+Success
+PartialSuccess
+Failed
+ToolMissing
+PermissionDenied
+Timeout
+Unsupported
+
+采集失败不等于 RAID 正常。
+
+11.5 故障盘定位
+
+支持以下层级：
+
+Server
+  └── RAID Controller
+       └── Virtual Disk / Array
+            └── Physical Disk
+                 ├── Enclosure
+                 ├── Slot
+                 ├── Serial Number
+                 ├── Model
+                 └── Health
+
+当 RAID 降级时，页面尽可能明确展示：
+
+哪台服务器
+
+哪个控制器
+
+哪个阵列
+
+哪个 Enclosure
+
+哪个 Slot
+
+哪块物理盘
+
+当前故障状态
+
+只有获得可靠背板映射时，才允许显示机箱物理槽位位置。
+
+11.6 工具管理
+
+Agent 自动检测本机工具：
+
+smartctl
+
+mdadm
+
+storcli
+
+perccli
+
+ssacli
+
+arcconf
+
+zpool
+
+lvs
+
+如果缺少工具：
+
+报告缺失状态
+
+显示推荐工具
+
+显示 CPU 架构
+
+显示工具兼容性
+
+不自动下载未知程序
+
+不自动执行未经授权的安装
+
+厂商工具必须遵守其许可与再分发要求。
+
+11.7 安全
+
+所有硬件采集命令必须：
+
+使用 exec.CommandContext
+
+设置超时
+
+限制输出大小
+
+使用固定白名单命令
+
+不使用 Shell 拼接
+
+不接受任意远程命令
+
+不允许执行 RAID 创建、删除、重建、清除配置等修改操作
+
+采用最小权限
+
+记录采集错误
+
+十二、采集周期
+
+默认配置：
+
+采集任务
+
+周期
+
+CPU
+
+5 秒
+
+内存
+
+5 秒
+
+Load
+
+5 秒
+
+网络
+
+5 秒
+
+TCP
+
+5 秒
+
+磁盘 I/O
+
+5 秒
+
+文件系统容量
+
+30 秒
+
+RAID
+
+60 秒
+
+SMART
+
+300 秒
+
+硬件基本信息
+
+启动时及每小时
+
+Agent 自检（自身健康）
+
+10 秒
+
+所有周期允许配置。
+
+后端拉取周期独立配置，默认 5 秒；慢采集组（RAID/SMART/硬件）由 Agent 内部按上表刷新，`/metrics` 只返回缓存。
+
+不同采集器独立运行，慢速 SMART 或 RAID 采集不能阻塞 CPU、网络等基础指标。
+
+十三、Agent 指标接口（拉模式）
+
+后端通过 Agent 现有 HTTP 端口（默认 19090）主动拉取：
+
+GET /metrics                     最新快照（读本地缓存，毫秒级返回）
+GET /metrics?groups=cpu,mem      只取指定采集组（可选）
+GET /metrics/history?since_ms=…  环形缓冲补采（可选）
+
+要求：
+
+Agent 侧采集器按各自周期独立运行，/metrics 只读缓存，不在请求内执行 smartctl / RAID 命令
+
+响应支持 gzip，单次建议 < 2 MB
+
+快照中每个采集组带 collected_at_ms 与 status，后端据此判断新鲜度与失败原因
+
+后端有界并发拉取，单机超时默认 3 秒，失败不影响其它主机
+
+时序时间戳由后端拉取时刻决定，不依赖 Agent 时钟
+
+连续 3 次拉取失败 → 主机标记离线并产生采集告警；恢复后自动继续
+
+不需要注册/心跳接口、批次序号、幂等键、离线缓存、Agent 密钥或证书
+
+复用现有约束：Agent 仅监听内网/回环，禁止暴露公网
+
+十四、数据库设计
+
+MySQL
+
+建议包含：
+
+hosts
+host_groups
+agents
+agent_versions
+hardware_inventory
+network_interfaces
+block_devices
+filesystems
+raid_controllers
+raid_arrays
+raid_physical_disks
+smart_devices
+alert_rules
+alert_events
+alert_notifications
+collection_errors
+system_settings
+
+要求：
+
+合理建立索引
+
+支持历史硬件变化
+
+支持设备热插拔
+
+支持软删除
+
+支持配置版本
+
+支持数据迁移
+
+VictoriaMetrics
+
+存储：
+
+CPU
+
+内存
+
+网络
+
+TCP
+
+磁盘 I/O
+
+文件系统容量
+
+SMART 数值指标
+
+RAID 状态指标
+
+Agent 自身健康指标
+
+要求：
+
+使用稳定标签
+
+控制标签基数
+
+避免把错误文本、时间戳等作为标签
+
+支持历史查询
+
+支持聚合查询
+
+支持不同时间范围的查询步长
+
+支持数据保留策略
+
+十五、Web 管理控制台
+
+15.1 整体风格
+
+Vue2 + Element UI。
+
+采用：
+
+顶部导航
+
+左侧二级菜单
+
+主内容区域
+
+清晰的数据卡片
+
+专业表格
+
+ECharts 曲线
+
+统一图标
+
+响应式布局
+
+风格要求：
+
+简洁、精致、现代、科技感。
+
+不要设计成传统老旧运维后台。
+
+15.2 首页：监控总览
+
+显示：
+
+服务器总数
+
+在线数量
+
+离线数量
+
+异常数量
+
+当前告警数量
+
+CPU 平均使用率
+
+内存平均使用率
+
+总网络吞吐
+
+RAID 降级数量
+
+SMART 异常硬盘数量
+
+支持主机列表筛选。
+
+15.3 服务器列表
+
+列包括：
+
+主机名
+
+IP
+
+服务器厂商
+
+型号
+
+OS
+
+CPU 使用率
+
+内存使用率
+
+磁盘使用率
+
+网络速率
+
+RAID 状态
+
+SMART 状态
+
+Agent 状态
+
+最后成功采集时间
+
+支持：
+
+搜索
+
+排序
+
+分页
+
+分组
+
+批量筛选
+
+15.4 服务器详情
+
+Tab：
+
+性能总览
+
+CPU
+
+内存
+
+磁盘 I/O
+
+文件系统
+
+网络
+
+TCP 连接
+
+SMART
+
+RAID
+
+硬件信息
+
+告警
+
+Agent 诊断
+
+15.5 曲线
+
+使用 ECharts。
+
+支持：
+
+实时刷新
+
+1 小时
+
+6 小时
+
+24 小时
+
+7 天
+
+30 天
+
+自定义时间范围
+
+多指标叠加
+
+单位自动转换
+
+鼠标悬停提示
+
+缩放
+
+导出 PNG
+
+CSV 导出
+
+不同量纲的指标不能错误地使用同一个纵轴。
+
+15.6 RAID 页面
+
+显示：
+
+服务器型号
+
+RAID 控制器
+
+RAID 级别
+
+虚拟磁盘
+
+阵列状态
+
+物理磁盘槽位
+
+SMART 健康
+
+重建进度
+
+热备盘
+
+采集工具
+
+最近采集时间
+
+采集错误
+
+需要有直观的磁盘槽位视图。
+
+颜色：
+
+绿色：正常
+
+黄色：警告、重建
+
+红色：故障、降级
+
+灰色：未知、未采集
+
+同时使用文字和图标区分状态，不允许只依赖颜色。
+
+15.7 RAID 自动发现诊断
+
+新增页面：
+
+RAID Auto Discovery
+
+显示：
+
+服务器厂商与型号
+
+PCI 控制器
+
+Vendor ID / Device ID
+
+内核驱动
+
+匹配的适配器
+
+采集工具路径
+
+工具版本
+
+最近采集耗时
+
+最近成功时间
+
+采集状态
+
+错误原因
+
+十六、告警系统
+
+支持：
+
+CPU 使用率过高
+
+内存不足
+
+磁盘空间不足
+
+inode 不足
+
+磁盘 I/O 延迟过高
+
+网络丢包
+
+TCP 重传异常
+
+Bond 成员掉线
+
+服务器离线
+
+Agent 异常
+
+SMART 健康异常
+
+RAID 降级
+
+RAID 故障
+
+RAID 重建
+
+物理磁盘故障
+
+RAID 采集失败
+
+要求：
+阈值配置
+持续时间
+告警恢复
+告警去重
+告警抑制
+告警历史
+严重级别
+主机级规则
+分组级规则
+十七、Agent 性能要求
+Agent 必须适合长期运行。
+
+目标：
+常规采集 CPU 开销尽量低于单个逻辑核心的 1%，实际以基准测试为准。
+常规 RSS 尽量控制在 50MB 左右，视设备数量和采集器而定。
+采集器独立调度。
+SMART、RAID 外部命令不得高频执行。
+支持 128 核及以上服务器。
+支持数十块物理磁盘。
+支持多网卡和 Bond。
+支持 x86_64、aarch64。
+支持 systemd 自动启动。
+支持异常退出自动恢复。
+支持优雅停止。
+支持日志轮转。
+
+## 十九、实现边界与关键决策（执行前确认）
+
+以下约定用于解决 §18 与既有实现、旧版规格之间的冲突。未确认前不进入编码。
+
+### 19.1 与现有系统的关系
+
+- 现有 Agent 19090 端口的执行、文件、终端、升级能力保持不变。
+- 监控复用同一端口，新增只读 GET 接口；不新开监听端口。
+- Agent 仍然不主动连接后端；后端是唯一发起方，网络方向与现有执行链路一致，防火墙只需放行「后端 → 19090」。
+- §18 中原「Agent 主动上报 / 不开放端口」的要求作废，改为「复用既有端口拉取」。
+- §0/§4 的「不做身份认证」继续适用于整条链路，不新增 Agent 认证例外。
+
+### 19.2 认证与 TLS（不引入）
+
+- 拉模式下没有「谁在推数据」的问题：数据来源由后端拨号的目标地址（`servers.ip`）决定，无法被伪造成另一台主机。
+- 因此不需要注册令牌、agent_id、长期密钥、HMAC 签名、时间偏移校验，也不需要为监控单独分发 CA。
+- 沿用现状：HTTP 明文、仅限内网、禁止公网暴露。未来加密与执行链路统一升级（M8），监控不单独做。
+- 风险须在文档写明：19090 本身无认证，能访问它的人既能执行命令也能读指标；监控数据敏感度不高于执行能力，因此不构成新增风险面。
+
+### 19.3 组件与数据流
+
+- MySQL：资产、配置、告警规则/事件、采集错误、版本记录。
+- VictoriaMetrics（单节点）：时序指标，由后端写入，Web 经后端查询。
+- MinIO：继续存放 Agent 制品，不承载监控数据。
+- 采集链路：后端 Scraper（定时 + 有界并发）→ `GET http://<ip>:19090/metrics` → 校验/补标签 → 写 VictoriaMetrics。
+- 查询链路：Web → 后端 → VictoriaMetrics / MySQL。
+- 备选（规模化后再考虑）：由 vmagent 直接抓取 `/metrics`，后端只维护 targets；v2 不引入，避免多一套配置与标签注入逻辑。
+
+### 19.4 现有表复用（不新建并行主机表）
+
+| 新需求表 | 落地方式 |
+|---|---|
+| hosts | 复用 `servers`，按需扩展硬件字段 |
+| host_groups | 复用 `groups` |
+| agents | 复用 `agents`，扩展最后成功拉取时间、采集器状态 |
+| agent_versions | 新建 |
+| hardware_inventory / network_interfaces / block_devices / filesystems / raid_* / smart_devices | 新建，统一按 `server_id` 关联 `servers.id` |
+| alert_rules / alert_events / alert_notifications / collection_errors / system_settings | 新建 |
+
+历史变化（换盘、换网卡、RAID 重构）使用 `*_history` 表或 `valid_from/valid_to` 记录，不覆盖旧记录。
+
+### 19.5 拉取协议与快照格式
+
+后端按周期 `GET /metrics`，Agent 返回本地最新快照（不在请求内做慢采集）：
+
+```json
+GET /metrics   (Accept-Encoding: gzip)
+{
+  "agent_version": "0.2.0",
+  "machine_id": "sha256:...",
+  "collected_at_ms": 1730000000000,
+  "collectors": {
+    "cpu":      { "collected_at_ms": 1730000000000, "status": "Success", "data": { "usage_percent": 12.5, "per_core": [12.1, 13.0], "load1": 0.4 } },
+    "memory":   { "collected_at_ms": 1730000000000, "status": "Success", "data": { "total_bytes": 0, "available_bytes": 0, "swap_used_bytes": 0 } },
+    "disk":     { "collected_at_ms": 1730000000000, "status": "Success", "data": [ { "device": "nvme0n1", "read_bps": 0, "write_bps": 0, "iops": 0 } ] },
+    "fs":       { "collected_at_ms": 1730000000000, "status": "Success", "data": [ { "mount": "/", "used_percent": 61.2, "inode_used_percent": 3.1 } ] },
+    "net":      { "collected_at_ms": 1730000000000, "status": "Success", "data": [ { "device": "eth0", "rx_bps": 0, "tx_bps": 0, "drops": 0 } ] },
+    "tcp":      { "collected_at_ms": 1730000000000, "status": "Success", "data": { "established": 42, "time_wait": 8, "retrans_rate": 0.001 } },
+    "hardware": { "collected_at_ms": 1729999000000, "status": "Success", "data": { } },
+    "raid":     { "collected_at_ms": 1729998000000, "status": "PartialSuccess", "data": { } },
+    "smart":    { "collected_at_ms": 1729997000000, "status": "ToolMissing", "data": null }
+  },
+  "agent_self": { "goroutines": 18, "rss_bytes": 0, "collect_duration_ms": { "cpu": 4, "smart": 812 } }
+}
+```
+
+- 每个采集组自带 `collected_at_ms` 与 `status`，后端据此判断新鲜度与失败原因。
+- 慢采集组（hardware/raid/smart）在 Agent 内部按 60s/300s 独立刷新，`/metrics` 只读缓存，保证拉取延迟稳定。
+- 后端每次拉取写入整份快照；相同时间戳的重复写入由 VictoriaMetrics 幂等去重。
+- 后端记录每台主机的 `last_ok_at` 与连续失败次数；连续 3 次失败标记离线并告警。
+- 环形缓冲建议保留 10–15 分钟（5s 采样约 120–180 份），后端重启后通过 `/metrics/history?since_ms=` 补采；超出窗口的数据记为缺口。
+- 所有时间戳为 UTC 毫秒。
+
+### 19.6 告警通知范围（v1）
+
+- 渠道：站内告警中心 + Webhook（通用 JSON，可对接企业微信/钉钉机器人）；邮件/短信后续。
+- 规则字段：`metric`、`operator`、`threshold`、`duration`、`severity`、`scope`（host/group/global）、`enabled`、`silence_until`。
+- 去重键：`(rule_id, host_id, device_id)`；状态：firing → acknowledged → resolved；恢复需连续满足阈值持续时间。
+- RAID/SMART 采集失败本身必须告警（采集失败 ≠ 正常）。
+
+### 19.7 规模与性能基线（可配置）
+
+- 单后端 ≤ 500 台主机；基础指标 5s；RAID 60s；SMART 300s。
+- 拉取并发默认 32（可配），单机超时 3s，按 `server_id` 取模错峰；500 台 × 5s ≈ 100 次 GET/s，使用 keep-alive 复用连接。
+- 每主机 ≤ 64 块物理盘、≤ 8 个 RAID 控制器、≤ 32 张网卡、≤ 128 逻辑核。
+- VictoriaMetrics 原始精度保留 30 天，降采样保留 180 天（按部署调整）。
+- Agent：常规采集 CPU 开销 < 1 个逻辑核，RSS 目标约 50MB；慢采集独立 goroutine，禁止阻塞基础采集。
+- 后端宕机期间无采集，靠 Agent 环形缓冲补采；超出缓冲窗口的数据丢弃并记录缺口。
+
+### 19.8 安全底线
+
+- 外部命令使用固定白名单 + `exec.CommandContext` + 超时 + 输出上限，禁止 shell 拼接。
+- 只读采集；禁止 RAID 创建/删除/重建/清配置等写操作。
+- 不自动下载或安装厂商工具，只报告缺失与推荐。
+- 不新增端口；沿用 19090 仅监听内网/回环、禁止暴露公网的约束。
