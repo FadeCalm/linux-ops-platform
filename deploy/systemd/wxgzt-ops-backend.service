@@ -1,0 +1,26 @@
+[Unit]
+Description=wxgzt-ops management backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The backend also runs as root: this deployment must not create a dedicated
+# service user. It only needs /opt/wxgzt-ops, /etc/wxgzt-ops and
+# /var/lib/wxgzt-ops, so the sandbox options below stay enabled.
+User=root
+Group=root
+WorkingDirectory=/opt/wxgzt-ops
+# MySQL / JWT secrets and optional MinIO settings live here (chmod 600).
+EnvironmentFile=/etc/wxgzt-ops/backend.env
+ExecStart=/opt/wxgzt-ops/bin/backend -config /etc/wxgzt-ops/backend.yaml
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

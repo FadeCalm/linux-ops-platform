@@ -13,11 +13,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"linux-ops-platform/agent/internal/config"
 )
 
 func newFSTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	ts := httptest.NewServer((&Server{}).Handler())
+	cfg := config.Default()
+	// httptest connects over loopback; the allowlist must include it.
+	cfg.AllowedIPs = []string{"127.0.0.1", "::1"}
+	ts := httptest.NewServer((&Server{cfg: cfg}).Handler())
 	t.Cleanup(ts.Close)
 	return ts
 }

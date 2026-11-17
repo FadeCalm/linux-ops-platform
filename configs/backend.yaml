@@ -2,13 +2,18 @@
 # For local/dev runs put real values in `configs/local.yaml` (gitignored) and
 # start with: ./bin/backend.exe -config configs/local.yaml
 # Secrets can also come from environment variables:
-#   DB_PASSWORD, DB_DSN (optional full DSN), LISTEN_ADDR, LOG_DIR, FRONTEND_DIR,
-#   ALLOW_ORIGIN, ACCESS_PASSWORD, SESSION_HOURS
+#   DB_HOST, DB_PORT, DB_USER, DB_NAME, DB_PASSWORD, DB_DSN (optional full DSN),
+#   LISTEN_ADDR, LOG_DIR, FRONTEND_DIR, ALLOW_ORIGIN, ACCESS_PASSWORD,
+#   SESSION_HOURS, JWT_SECRET, JWT_MINUTES,
+#   MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_BUCKET,
+#   MINIO_UPDATE_BASE_URL
 #
-# Access is gated by one shared password (auth.access_password), which is not
-# real authentication. Bind to a private management interface only.
+# Access uses username/password accounts with two roles (admin/user), plus
+# short-lived JWTs and long-lived API tokens for scripts. This is still not a
+# hardened auth system: no TLS, no MFA, no Agent authentication. Bind to a
+# private management interface only.
 
-listen_addr: "127.0.0.1:8080"
+listen_addr: "127.0.0.1:8089"
 # Set to a concrete origin in production, e.g. "http://10.0.0.10".
 allow_origin: "*"
 # When the built frontend is deployed alongside the backend, point this at it.
@@ -17,13 +22,18 @@ frontend_dir: ""
 
 log_dir: "./data/logs"
 
-# Shared password gate for the UI and API. This is not user management; it only
-# keeps casual visitors out of an isolated management network. Leave the
-# password empty to disable the gate. Prefer the ACCESS_PASSWORD env var when
-# deploying: it keeps the secret out of the file.
+# Bootstrap password for the built-in `admin` account. It is only applied when
+# no admin user exists yet; afterwards the password lives in the database and is
+# changed from the UI. An empty value seeds `changeme`. Prefer the
+# ACCESS_PASSWORD env var when deploying: it keeps the secret out of the file.
 auth:
   access_password: ""
   session_hours: 12
+  # Signs short-lived JWT bearer tokens (POST /api/v1/auth/token). Leave empty
+  # to auto-generate and persist a key in app_settings on first start; set
+  # JWT_SECRET to rotate it (which invalidates all outstanding JWTs).
+  jwt_secret: ""
+  jwt_minutes: 120
 
 mysql:
   host: "127.0.0.1"
@@ -35,7 +45,7 @@ mysql:
   max_open_conns: 20
   max_idle_conns: 5
   auto_migrate: true      # false only if you applied database/schema.sql manually
-  seed: true              # insert demo group/server when the servers table is empty
+  seed: true              # create the bootstrap admin; also inserts demo data when servers is empty
 
 # Object store for agent packages (also used by bin/minio_upload.py).
 # Leave secrets empty here; put real values in configs/local.yaml.
@@ -43,8 +53,8 @@ minio:
   endpoint: "http://127.0.0.1:9000"
   access_key: ""
   secret_key: ""
-  bucket: "linux-ops-agent"
-  update_base_url: "http://127.0.0.1:9000/linux-ops-agent"
+  bucket: "wxgzt-ops"
+  update_base_url: "http://127.0.0.1:9000/wxgzt-ops"
 
 scheduler:
   heartbeat_interval_sec: 20

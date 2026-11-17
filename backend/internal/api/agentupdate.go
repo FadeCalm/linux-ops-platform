@@ -59,7 +59,7 @@ func (h *Handlers) AgentUpdate(c *gin.Context) {
 		return
 	}
 	if res.Updated {
-		h.audit("agent.update", "server", strconv.FormatInt(srv.ID, 10),
+		h.audit(c, "agent.update", "server", strconv.FormatInt(srv.ID, 10),
 			res.From+" -> "+res.To)
 	}
 	ok(c, res)
@@ -83,13 +83,21 @@ func (h *Handlers) batchServers(c *gin.Context) ([]models.Server, bool) {
 		fail(c, http.StatusBadRequest, "too many servers (max 200)")
 		return nil, false
 	}
+	q := h.db.Where("id IN ?", req.ServerIDs)
+	if u := currentUser(c); !h.isAdmin(u) {
+		q = q.Where("owner_id = ?", u.ID)
+	}
 	var servers []models.Server
-	if err := h.db.Where("id IN ?", req.ServerIDs).Find(&servers).Error; err != nil {
+	if err := q.Find(&servers).Error; err != nil {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return nil, false
 	}
 	if len(servers) == 0 {
 		fail(c, http.StatusNotFound, "no matching servers")
+		return nil, false
+	}
+	if len(servers) != len(uniqueIDs(req.ServerIDs)) {
+		fail(c, http.StatusForbidden, "包含无权访问的服务器")
 		return nil, false
 	}
 	return servers, true
@@ -162,7 +170,7 @@ func (h *Handlers) BatchAgentUpdate(c *gin.Context) {
 		item.Source = res.Source
 		item.Verified = res.Verified
 		if res.Updated {
-			h.audit("agent.update", "server", strconv.FormatInt(srv.ID, 10),
+			h.audit(c, "agent.update", "server", strconv.FormatInt(srv.ID, 10),
 				res.From+" -> "+res.To)
 		}
 		return item

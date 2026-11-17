@@ -49,23 +49,34 @@ func (h *Handlers) CreateTask(c *gin.Context) {
 		req.TimeoutMS = h.cfg.Scheduler.MaxTimeoutMS
 	}
 
-	// Idempotency: an existing key returns the original task unchanged.
+	user := currentUser(c)
+
+	// Idempotency: an existing key returns the original task unchanged, but
+	// only to the account that owns it.
 	if req.IdempotencyKey != nil && strings.TrimSpace(*req.IdempotencyKey) != "" {
 		var existing models.ExecutionTask
 		err := h.db.Where("idempotency_key = ?", *req.IdempotencyKey).First(&existing).Error
 		if err == nil {
+			if !h.canAccessTask(user, &existing) {
+				fail(c, http.StatusConflict, "idempotency_key 已被其他任务使用")
+				return
+			}
 			h.respondTask(c, existing.ID)
 			return
 		}
 	}
 
+	q := h.db.Where("id IN ?", req.ServerIDs)
+	if !h.isAdmin(user) {
+		q = q.Where("owner_id = ?", user.ID)
+	}
 	var servers []models.Server
-	if err := h.db.Where("id IN ?", req.ServerIDs).Find(&servers).Error; err != nil {
+	if err := q.Find(&servers).Error; err != nil {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if len(servers) != len(uniqueIDs(req.ServerIDs)) {
-		fail(c, http.StatusBadRequest, "one or more servers not found")
+		fail(c, http.StatusForbidden, "包含不存在或无权访问的服务器")
 		return
 	}
 
@@ -73,7 +84,8 @@ func (h *Handlers) CreateTask(c *gin.Context) {
 	parent := models.ExecutionTask{
 		ID: uuid.NewString(), Command: req.Command, WorkDir: req.WorkDir,
 		TimeoutMS: req.TimeoutMS, Status: models.StatusPending, Total: len(servers),
-		IdempotencyKey: req.IdempotencyKey, CreatedBy: "anonymous", CreatedAt: now,
+		IdempotencyKey: req.IdempotencyKey, CreatedBy: user.Username,
+		OwnerID: user.ID, OwnerName: user.Username, CreatedAt: now,
 	}
 	targets := make([]models.ExecutionTaskTarget, 0, len(servers))
 	for _, srv := range servers {
@@ -94,7 +106,7 @@ func (h *Handlers) CreateTask(c *gin.Context) {
 		return
 	}
 
-	h.audit("task.create", "task", parent.ID, fmt.Sprintf("servers=%d command=%s", len(servers), truncate(req.Command, 200)))
+	h.audit(c, "task.create", "task", parent.ID, fmt.Sprintf("servers=%d command=%s", len(servers), truncate(req.Command, 200)))
 	h.sched.Submit(targets)
 	h.respondTask(c, parent.ID)
 }
@@ -105,6 +117,10 @@ func (h *Handlers) respondTask(c *gin.Context, taskID string) {
 		fail(c, http.StatusNotFound, "task not found")
 		return
 	}
+	if !h.canAccessTask(currentUser(c), &parent) {
+		fail(c, http.StatusForbidden, "无权访问该任务")
+		return
+	}
 	var targets []models.ExecutionTaskTarget
 	h.db.Where("parent_task_id = ?", taskID).Order("created_at asc").Find(&targets)
 	ok(c, gin.H{"task": parent, "targets": targets})
@@ -113,6 +129,9 @@ func (h *Handlers) respondTask(c *gin.Context, taskID string) {
 func (h *Handlers) ListTasks(c *gin.Context) {
 	page, size := pageParams(c)
 	q := h.db.Model(&models.ExecutionTask{})
+	if u := currentUser(c); !h.isAdmin(u) {
+		q = q.Where("execution_tasks.owner_id = ?", u.ID)
+	}
 
 	if v := c.Query("status"); v != "" {
 		q = q.Where("status = ?", v)
@@ -144,9 +163,8 @@ func (h *Handlers) ListTasks(c *gin.Context) {
 
 func (h *Handlers) GetTask(c *gin.Context) {
 	taskID := c.Param("id")
-	var parent models.ExecutionTask
-	if err := h.db.First(&parent, "id = ?", taskID).Error; err != nil {
-		fail(c, http.StatusNotFound, "task not found")
+	parent, allowed := h.loadTaskForUser(c, taskID)
+	if !allowed {
 		return
 	}
 	var targets []models.ExecutionTaskTarget
@@ -156,6 +174,9 @@ func (h *Handlers) GetTask(c *gin.Context) {
 
 func (h *Handlers) ListTaskTargets(c *gin.Context) {
 	taskID := c.Param("id")
+	if _, allowed := h.loadTaskForUser(c, taskID); !allowed {
+		return
+	}
 	var targets []models.ExecutionTaskTarget
 	if err := h.db.Where("parent_task_id = ?", taskID).Order("created_at asc").Find(&targets).Error; err != nil {
 		fail(c, http.StatusInternalServerError, err.Error())
@@ -165,9 +186,8 @@ func (h *Handlers) ListTaskTargets(c *gin.Context) {
 }
 
 func (h *Handlers) GetTarget(c *gin.Context) {
-	var target models.ExecutionTaskTarget
-	if err := h.db.First(&target, "id = ?", c.Param("id")).Error; err != nil {
-		fail(c, http.StatusNotFound, "target not found")
+	target, _, allowed := h.loadTargetForUser(c, c.Param("id"))
+	if !allowed {
 		return
 	}
 	ok(c, target)
@@ -175,9 +195,8 @@ func (h *Handlers) GetTarget(c *gin.Context) {
 
 func (h *Handlers) CancelTarget(c *gin.Context) {
 	targetID := c.Param("id")
-	var target models.ExecutionTaskTarget
-	if err := h.db.First(&target, "id = ?", targetID).Error; err != nil {
-		fail(c, http.StatusNotFound, "target not found")
+	target, _, allowed := h.loadTargetForUser(c, targetID)
+	if !allowed {
 		return
 	}
 	active := h.sched.CancelTarget(targetID)
@@ -185,27 +204,24 @@ func (h *Handlers) CancelTarget(c *gin.Context) {
 		fail(c, http.StatusConflict, "target already finished")
 		return
 	}
-	h.audit("target.cancel", "target", targetID, "")
+	h.audit(c, "target.cancel", "target", targetID, "")
 	ok(c, gin.H{"cancelling": true})
 }
 
 func (h *Handlers) CancelTask(c *gin.Context) {
 	taskID := c.Param("id")
+	if _, allowed := h.loadTaskForUser(c, taskID); !allowed {
+		return
+	}
 	n := h.sched.CancelTask(taskID)
-	h.audit("task.cancel", "task", taskID, fmt.Sprintf("cancelled=%d", n))
+	h.audit(c, "task.cancel", "task", taskID, fmt.Sprintf("cancelled=%d", n))
 	ok(c, gin.H{"cancelled": n})
 }
 
 func (h *Handlers) RetryTarget(c *gin.Context) {
 	targetID := c.Param("id")
-	var target models.ExecutionTaskTarget
-	if err := h.db.First(&target, "id = ?", targetID).Error; err != nil {
-		fail(c, http.StatusNotFound, "target not found")
-		return
-	}
-	var parent models.ExecutionTask
-	if err := h.db.First(&parent, "id = ?", target.ParentTaskID).Error; err != nil {
-		fail(c, http.StatusNotFound, "parent task not found")
+	target, parent, allowed := h.loadTargetForUser(c, targetID)
+	if !allowed {
 		return
 	}
 	var server models.Server
@@ -213,11 +229,17 @@ func (h *Handlers) RetryTarget(c *gin.Context) {
 		fail(c, http.StatusNotFound, "server not found")
 		return
 	}
+	if !h.canAccessServer(currentUser(c), &server) {
+		fail(c, http.StatusForbidden, "无权操作该服务器")
+		return
+	}
 	now := time.Now().UTC()
+	user := currentUser(c)
 	newParent := models.ExecutionTask{
 		ID: uuid.NewString(), Command: parent.Command, WorkDir: parent.WorkDir,
 		TimeoutMS: parent.TimeoutMS, Status: models.StatusPending, Total: 1,
-		CreatedBy: "anonymous", CreatedAt: now,
+		CreatedBy: user.Username, OwnerID: parent.OwnerID, OwnerName: parent.OwnerName,
+		CreatedAt: now,
 	}
 	newTarget := models.ExecutionTaskTarget{
 		ID: uuid.NewString(), ParentTaskID: newParent.ID, ServerID: server.ID,
@@ -233,16 +255,15 @@ func (h *Handlers) RetryTarget(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	h.audit("target.retry", "target", targetID, "new_task="+newParent.ID)
+	h.audit(c, "target.retry", "target", targetID, "new_task="+newParent.ID)
 	h.sched.Submit([]models.ExecutionTaskTarget{newTarget})
 	h.respondTask(c, newParent.ID)
 }
 
 // GetTargetLogs returns a base64-encoded chunk of a persisted stream.
 func (h *Handlers) GetTargetLogs(c *gin.Context) {
-	var target models.ExecutionTaskTarget
-	if err := h.db.First(&target, "id = ?", c.Param("id")).Error; err != nil {
-		fail(c, http.StatusNotFound, "target not found")
+	target, _, allowed := h.loadTargetForUser(c, c.Param("id"))
+	if !allowed {
 		return
 	}
 	stream := c.DefaultQuery("stream", "stdout")
@@ -276,9 +297,8 @@ func (h *Handlers) GetTargetLogs(c *gin.Context) {
 
 // DownloadTargetLogs streams a persisted log file for download.
 func (h *Handlers) DownloadTargetLogs(c *gin.Context) {
-	var target models.ExecutionTaskTarget
-	if err := h.db.First(&target, "id = ?", c.Param("id")).Error; err != nil {
-		fail(c, http.StatusNotFound, "target not found")
+	target, _, allowed := h.loadTargetForUser(c, c.Param("id"))
+	if !allowed {
 		return
 	}
 	stream := c.DefaultQuery("stream", "stdout")
@@ -298,6 +318,9 @@ func (h *Handlers) DownloadTargetLogs(c *gin.Context) {
 func (h *Handlers) ListAudit(c *gin.Context) {
 	page, size := pageParams(c)
 	q := h.db.Model(&models.AuditEvent{})
+	if u := currentUser(c); !h.isAdmin(u) {
+		q = q.Where("operator = ?", u.Username)
+	}
 	if v := c.Query("action"); v != "" {
 		q = q.Where("action = ?", v)
 	}

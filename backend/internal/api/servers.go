@@ -23,7 +23,7 @@ type serverRequest struct {
 
 func (h *Handlers) ListServers(c *gin.Context) {
 	page, size := pageParams(c)
-	q := h.db.Model(&models.Server{}).Preload("Tags")
+	q := h.scopedServerQuery(currentUser(c)).Preload("Tags")
 
 	if v := strings.TrimSpace(c.Query("q")); v != "" {
 		like := "%" + v + "%"
@@ -56,11 +56,11 @@ func (h *Handlers) GetServer(c *gin.Context) {
 	if !okID {
 		return
 	}
-	var srv models.Server
-	if err := h.db.Preload("Tags").First(&srv, id).Error; err != nil {
-		fail(c, http.StatusNotFound, "server not found")
+	srv, allowed := h.loadServerForUser(c, id)
+	if !allowed {
 		return
 	}
+	h.db.Preload("Tags").First(srv, srv.ID)
 	ok(c, srv)
 }
 
@@ -87,9 +87,11 @@ func (h *Handlers) CreateServer(c *gin.Context) {
 	// probe the agent once; a reachable agent reports its hostname, which then
 	// becomes the server name.
 	autoName := name == ""
+	owner := currentUser(c)
 	srv := models.Server{
 		Name: name, IP: ip, AgentPort: req.AgentPort,
 		GroupID: req.GroupID, Status: models.StatusUnknownAgent,
+		OwnerID: owner.ID, OwnerName: owner.Username,
 	}
 	if autoName {
 		srv.Name = ip
@@ -116,7 +118,7 @@ func (h *Handlers) CreateServer(c *gin.Context) {
 			}
 		}
 	}
-	h.audit("server.create", "server", strconv.FormatInt(srv.ID, 10), srv.Name+" "+ip)
+	h.audit(c, "server.create", "server", strconv.FormatInt(srv.ID, 10), srv.Name+" "+ip)
 	h.db.Preload("Tags").First(&srv, srv.ID)
 	ok(c, srv)
 }
@@ -129,6 +131,10 @@ func (h *Handlers) UpdateServer(c *gin.Context) {
 	var srv models.Server
 	if err := h.db.First(&srv, id).Error; err != nil {
 		fail(c, http.StatusNotFound, "server not found")
+		return
+	}
+	if !h.canAccessServer(currentUser(c), &srv) {
+		fail(c, http.StatusForbidden, "无权操作该服务器")
 		return
 	}
 	var req serverRequest
@@ -160,7 +166,7 @@ func (h *Handlers) UpdateServer(c *gin.Context) {
 		return
 	}
 	h.db.Model(&srv).Association("Tags").Replace(tags)
-	h.audit("server.update", "server", strconv.FormatInt(id, 10), req.Name+" "+req.IP)
+	h.audit(c, "server.update", "server", strconv.FormatInt(id, 10), req.Name+" "+req.IP)
 	h.db.Preload("Tags").First(&srv, id)
 	ok(c, srv)
 }
@@ -168,6 +174,9 @@ func (h *Handlers) UpdateServer(c *gin.Context) {
 func (h *Handlers) DeleteServer(c *gin.Context) {
 	id, okID := parseID(c)
 	if !okID {
+		return
+	}
+	if _, allowed := h.loadServerForUser(c, id); !allowed {
 		return
 	}
 	var active int64
@@ -194,7 +203,7 @@ func (h *Handlers) DeleteServer(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	h.audit("server.delete", "server", strconv.FormatInt(id, 10), "")
+	h.audit(c, "server.delete", "server", strconv.FormatInt(id, 10), "")
 	ok(c, gin.H{"deleted": true})
 }
 
@@ -245,6 +254,9 @@ func (h *Handlers) BatchCheckServers(c *gin.Context) {
 func (h *Handlers) GetAgent(c *gin.Context) {
 	id, okID := parseID(c)
 	if !okID {
+		return
+	}
+	if _, allowed := h.loadServerForUser(c, id); !allowed {
 		return
 	}
 	var ag models.Agent

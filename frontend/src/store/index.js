@@ -8,7 +8,13 @@ export default new Vuex.Store({
   state: {
     limits: null,
     backendOnline: true,
-    authRequired: false
+    authRequired: false,
+    user: null
+  },
+  getters: {
+    isAdmin(state) {
+      return !!(state.user && state.user.role === 'admin')
+    }
   },
   mutations: {
     setLimits(state, limits) {
@@ -19,6 +25,9 @@ export default new Vuex.Store({
     },
     setAuthRequired(state, required) {
       state.authRequired = required
+    },
+    setUser(state, user) {
+      state.user = user || null
     }
   },
   actions: {

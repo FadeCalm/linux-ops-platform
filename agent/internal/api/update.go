@@ -36,7 +36,6 @@ func (s *Server) updateApply(w http.ResponseWriter, r *http.Request) {
 			// Give the HTTP response (and the backend's audit write) time to
 			// complete before the process image is replaced.
 			time.Sleep(700 * time.Millisecond)
-			log.Printf("[agent] restarting after update to %s", res.To)
 			if err := update.Restart(exe); err != nil {
 				log.Printf("[agent] restart failed: %v", err)
 			}

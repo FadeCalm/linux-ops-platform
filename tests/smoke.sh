@@ -3,10 +3,10 @@
 # Requires: curl, python3. Run on the Linux server after scripts/install.sh.
 #
 #   tests/smoke.sh
-#   BACKEND_URL=http://10.0.0.10:8080 tests/smoke.sh
+#   BACKEND_URL=http://10.0.0.10:8089 tests/smoke.sh
 set -euo pipefail
 
-BACKEND_URL="${BACKEND_URL:-http://127.0.0.1:8080}"
+BACKEND_URL="${BACKEND_URL:-http://127.0.0.1:8089}"
 API="$BACKEND_URL/api/v1"
 PASS=0
 FAIL=0
@@ -50,8 +50,8 @@ say "==> login"
 REQUIRED="$(curl -fsS "$API/auth/status" | wrap_data 'data.required')"
 if [[ "$REQUIRED" == "True" || "$REQUIRED" == "true" ]]; then
   ACCESS_PASSWORD="${ACCESS_PASSWORD:-}"
-  if [[ -z "$ACCESS_PASSWORD" && -f /etc/linux-ops/backend.env ]]; then
-    ACCESS_PASSWORD="$(grep -E '^ACCESS_PASSWORD=' /etc/linux-ops/backend.env | head -1 | cut -d= -f2-)"
+  if [[ -z "$ACCESS_PASSWORD" && -f /etc/wxgzt-ops/backend.env ]]; then
+    ACCESS_PASSWORD="$(grep -E '^ACCESS_PASSWORD=' /etc/wxgzt-ops/backend.env | head -1 | cut -d= -f2-)"
   fi
   if [[ -z "$ACCESS_PASSWORD" ]]; then
     bad "backend requires a password; export ACCESS_PASSWORD=<password>"; exit 1

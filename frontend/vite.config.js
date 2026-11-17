@@ -52,7 +52,7 @@ export default defineConfig(({ mode }) => {
 
   const proxy = {
     '/api': {
-      target: 'http://127.0.0.1:8080',
+      target: 'http://127.0.0.1:8089',
       changeOrigin: true,
       ws: true
     }
@@ -63,7 +63,7 @@ export default defineConfig(({ mode }) => {
   // the production Nginx does.
   if (apiBase !== '/api/v1') {
     proxy[apiBase] = {
-      target: 'http://127.0.0.1:8080',
+      target: 'http://127.0.0.1:8089',
       changeOrigin: true,
       ws: true,
       rewrite: (p) => '/api/v1' + p.slice(apiBase.length)

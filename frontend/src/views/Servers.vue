@@ -41,7 +41,9 @@
             >批量升级{{ batchLabel }}</el-button>
           </span>
         </el-tooltip>
-        <el-button icon="el-icon-collection" @click="manageVisible = true">分组 / 标签</el-button>
+        <el-tooltip v-if="isAdmin" content="分组与标签为全局配置，仅管理员可维护" placement="top">
+          <el-button icon="el-icon-collection" @click="manageVisible = true">分组 / 标签</el-button>
+        </el-tooltip>
         <el-button type="primary" icon="el-icon-plus" @click="openCreate">新增服务器</el-button>
       </div>
 
@@ -56,6 +58,17 @@
         <el-table-column prop="id" label="ID" width="70" />
         <el-table-column prop="name" label="名称" min-width="140">
           <template slot-scope="{ row }"><strong>{{ row.name }}</strong></template>
+        </el-table-column>
+        <el-table-column label="归属账号" width="160">
+          <template slot-scope="{ row }">
+            <el-tag
+              v-if="row.owner_id"
+              size="mini"
+              effect="plain"
+              :type="row.owner_id === meId ? 'success' : 'warning'"
+            >{{ ownerLabel(row) }}</el-tag>
+            <span v-else class="muted">-</span>
+          </template>
         </el-table-column>
         <el-table-column label="Agent 地址" min-width="170">
           <template slot-scope="{ row }"><span class="mono">{{ row.ip }}:{{ row.agent_port }}</span></template>
@@ -128,6 +141,14 @@
     <!-- create / edit -->
     <el-dialog :title="editing ? '编辑服务器' : '新增服务器'" :visible.sync="editVisible" width="520px">
       <el-form :model="form" label-width="90px">
+        <el-form-item label="归属账号">
+          <el-tag size="small" effect="plain" :type="editing ? 'warning' : 'success'">
+            {{ editing ? (form.owner_name || '未分配') : myName }}
+          </el-tag>
+          <div v-if="!editing" class="form-hint">
+            新增的服务器只属于当前账号，其他子用户不可见。
+          </div>
+        </el-form-item>
         <el-form-item label="名称">
           <el-input v-model="form.name" :placeholder="editing ? '例如 web-01' : '留空则自动使用主机名'" />
           <div v-if="!editing" class="form-hint">
@@ -283,7 +304,7 @@
 import api from '@/api'
 import { formatTime, statusClass, statusText } from '@/utils/format'
 
-const emptyForm = () => ({ id: null, name: '', ip: '', agent_port: 19090, group_id: null, tags: [] })
+const emptyForm = () => ({ id: null, name: '', ip: '', agent_port: 19090, group_id: null, tags: [], owner_name: '' })
 
 export default {
   name: 'Servers',
@@ -320,6 +341,17 @@ export default {
     }
   },
   computed: {
+    meId() {
+      const u = this.$store.state.user
+      return u ? u.id : 0
+    },
+    myName() {
+      const u = this.$store.state.user
+      return u ? u.username : ''
+    },
+    isAdmin() {
+      return this.$store.getters.isAdmin
+    },
     updatableCount() {
       return this.servers.filter((s) => this.hasUpdate(s)).length
     },
@@ -336,6 +368,11 @@ export default {
     groupName(id) {
       const g = this.groups.find((x) => x.id === id)
       return g ? g.name : '-'
+    },
+    ownerLabel(row) {
+      const name = row.owner_name || `#${row.owner_id}`
+      if (row.owner_id === this.meId) return `${this.isAdmin ? '管理员' : '本人'} · ${name}`
+      return `子账户 · ${name}`
     },
     sourceText(src) {
       if (src === 'listing') return '桶内扫描'
@@ -442,7 +479,8 @@ export default {
         ip: row.ip,
         agent_port: row.agent_port,
         group_id: row.group_id,
-        tags: (row.tags || []).map((t) => t.name)
+        tags: (row.tags || []).map((t) => t.name),
+        owner_name: row.owner_name || ''
       }
       this.editVisible = true
     },

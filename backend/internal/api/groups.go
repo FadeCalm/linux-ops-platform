@@ -36,7 +36,7 @@ func (h *Handlers) CreateGroup(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	h.audit("group.create", "group", strconv.FormatInt(g.ID, 10), g.Name)
+	h.audit(c, "group.create", "group", strconv.FormatInt(g.ID, 10), g.Name)
 	ok(c, g)
 }
 
@@ -60,7 +60,7 @@ func (h *Handlers) UpdateGroup(c *gin.Context) {
 		fail(c, http.StatusNotFound, "group not found")
 		return
 	}
-	h.audit("group.update", "group", strconv.FormatInt(id, 10), req.Name)
+	h.audit(c, "group.update", "group", strconv.FormatInt(id, 10), req.Name)
 	ok(c, gin.H{"updated": true})
 }
 
@@ -78,6 +78,6 @@ func (h *Handlers) DeleteGroup(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	h.audit("group.delete", "group", strconv.FormatInt(id, 10), "")
+	h.audit(c, "group.delete", "group", strconv.FormatInt(id, 10), "")
 	ok(c, gin.H{"deleted": true})
 }

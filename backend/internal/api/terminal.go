@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"time"
 
-	"linux-ops-platform/backend/internal/models"
 	"linux-ops-platform/backend/internal/scheduler"
 
 	"github.com/gin-gonic/gin"
@@ -27,11 +26,11 @@ func (h *Handlers) TerminalWS(c *gin.Context) {
 		return
 	}
 
-	var srv models.Server
-	if err := h.db.First(&srv, id).Error; err != nil {
-		fail(c, http.StatusNotFound, "server not found")
+	srvPtr, allowed := h.loadServerForUser(c, id)
+	if !allowed {
 		return
 	}
+	srv := *srvPtr
 
 	// Reserve a backend-side slot before upgrading, so a burst of clients
 	// cannot exhaust connections to agents.
@@ -66,8 +65,8 @@ func (h *Handlers) TerminalWS(c *gin.Context) {
 	agentConn.SetReadLimit(1 << 20)
 
 	rid := strconv.FormatInt(srv.ID, 10)
-	h.audit("terminal.open", "server", rid, "")
-	defer h.audit("terminal.close", "server", rid, "")
+	h.audit(c, "terminal.open", "server", rid, "")
+	defer h.audit(c, "terminal.close", "server", rid, "")
 
 	// Keepalive. WriteControl is safe to call concurrently with the pumps,
 	// unlike WriteMessage, which must stay single-writer per connection.

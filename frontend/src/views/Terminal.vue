@@ -29,7 +29,7 @@
     </div>
 
     <!-- interactive terminal -->
-    <div class="panel">
+    <div class="panel term-panel" :class="{ 'is-fullscreen': fullscreen }">
       <div class="toolbar">
         <span class="conn-badge" :class="'conn-' + state">{{ connLabel }}</span>
         <span class="muted mono" v-if="server.ip">{{ server.ip }}:{{ server.agent_port || 19090 }}</span>
@@ -54,22 +54,15 @@
           icon="el-icon-switch-button"
           @click="disconnect(true)"
         >断开</el-button>
+        <el-button
+          size="mini"
+          :icon="fullscreen ? 'el-icon-close' : 'el-icon-full-screen'"
+          @click="toggleFullscreen"
+        >{{ fullscreen ? '退出全屏' : '全屏' }}</el-button>
       </div>
 
       <div ref="host" class="xterm-host"></div>
 
-      <div class="term-foot">
-        <span>
-          <i class="el-icon-warning-outline"></i>
-          交互式 PTY 会话与「命令执行」的普通任务是两套引擎：这里的命令不会生成平台任务记录，
-          平台只审计会话的打开/关闭（operator = anonymous）。
-        </span>
-        <span>
-          断开连接、刷新或关闭页面都会终止远端 Shell。空闲超时与单次会话最长时长由目标主机
-          Agent 的 <code>terminal.idle_timeout_sec</code> / <code>terminal.max_duration_sec</code>
-          决定（样例配置为 600s / 3600s，0 表示关闭）。
-        </span>
-      </div>
     </div>
   </div>
 </template>
@@ -118,7 +111,10 @@ export default {
       cols: 80,
       rows: 24,
       elapsedSec: 0,
-      lastMessage: ''
+      lastMessage: '',
+      // CSS fullscreen overlay (not the browser Fullscreen API, so Esc stays
+      // available to the remote shell for vim/top).
+      fullscreen: false
     }
   },
   computed: {
@@ -411,6 +407,15 @@ export default {
         this.term.focus()
       }
     },
+    toggleFullscreen() {
+      this.fullscreen = !this.fullscreen
+      // The host element changes size, so recompute cols/rows once the new
+      // layout is applied (ResizeObserver also fires, this covers it early).
+      this.$nextTick(() => {
+        this.doFit()
+        if (this.fullscreen && this.term) this.term.focus()
+      })
+    },
     async copySelection() {
       if (!this.term) return
       const text = this.term.getSelection()
@@ -527,6 +532,31 @@ export default {
   height: calc(100vh - 380px);
   min-height: 420px;
   overflow: hidden;
+}
+
+/* Fullscreen terminal overlay: covers the viewport, toolbar stays visible and
+ * the xterm host takes all remaining height. */
+.term-panel.is-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  margin: 0;
+  border-radius: 0;
+  border: 0;
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.term-panel.is-fullscreen .toolbar {
+  flex: 0 0 auto;
+  margin-bottom: 10px;
+}
+.term-panel.is-fullscreen .xterm-host {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  border-radius: 8px;
 }
 .xterm-host :deep(.xterm) {
   height: 100%;

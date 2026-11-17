@@ -46,6 +46,9 @@ func New(cfg *config.Config, engine *exec.Engine, version string) *Server {
 	}
 }
 
+// Handler wraps the API mux with the source-IP allowlist. If the allowlist
+// cannot be parsed the handler fails closed (403 for everything) instead of
+// silently serving unauthenticated clients.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", s.health)
@@ -68,7 +71,21 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/v1/update/check", s.updateCheck)
 	mux.HandleFunc("POST /api/v1/update", s.updateApply)
-	return mux
+
+	allow, err := newIPAllowlist(s.cfg.AllowedIPs)
+	if err != nil {
+		log.Printf("[agent] invalid allowed_ips, refusing all requests: %v", err)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, http.StatusForbidden, "agent misconfigured: invalid allowed_ips")
+		})
+	}
+	if len(allow.prefixes) == 0 {
+		log.Printf("[agent] empty allowed_ips, refusing all requests")
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, http.StatusForbidden, "agent misconfigured: allowed_ips is empty")
+		})
+	}
+	return allow.middleware(mux)
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

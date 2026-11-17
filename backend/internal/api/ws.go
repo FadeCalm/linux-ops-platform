@@ -28,9 +28,8 @@ type wsClientMessage struct {
 // TaskWS upgrades to a WebSocket and streams live task output.
 func (h *Handlers) TaskWS(c *gin.Context) {
 	taskID := c.Param("id")
-	var parent models.ExecutionTask
-	if err := h.db.First(&parent, "id = ?", taskID).Error; err != nil {
-		fail(c, http.StatusNotFound, "task not found")
+	parent, allowed := h.loadTaskForUser(c, taskID)
+	if !allowed {
 		return
 	}
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -107,7 +106,7 @@ func (h *Handlers) TaskWS(c *gin.Context) {
 		case "cancel":
 			if msg.TargetID != "" {
 				h.sched.CancelTarget(msg.TargetID)
-				h.audit("target.cancel", "target", msg.TargetID, "via=websocket")
+				h.audit(c, "target.cancel", "target", msg.TargetID, "via=websocket")
 			}
 		}
 	}

@@ -1,6 +1,7 @@
-// Command backend is the Linux ops platform management service. Access can be
-// gated by a shared password (auth.access_password), but this is not real
-// authentication: run it only on an isolated management network.
+// Command backend is the Linux ops platform management service. Access uses
+// username/password accounts (admin/user with per-owner server isolation) plus
+// JWT/API bearer tokens for scripts, but this is not a hardened auth system:
+// run it only on an isolated management network, over plain HTTP.
 package main
 
 import (
@@ -39,6 +40,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("database: %v", err)
 	}
+	jwtSecret := database.EnsureJWTSecret(db, cfg.Auth.JWTSecret)
 
 	hub := ws.NewHub(cfg.WebSocket.ReplayBufferLen, cfg.WebSocket.MaxConnections)
 	store := logstore.New(cfg.LogDir, db)
@@ -48,7 +50,7 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
-	api.NewHandlers(cfg, db, sched, store, hub, agentCli).Register(r)
+	api.NewHandlers(cfg, db, sched, store, hub, agentCli, jwtSecret).Register(r)
 
 	// Optionally serve the built frontend from the same process.
 	if cfg.FrontendDir != "" {

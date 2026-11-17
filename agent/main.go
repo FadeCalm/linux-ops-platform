@@ -20,7 +20,7 @@ import (
 // version can be overridden at build time:
 //
 //	go build -ldflags "-X main.version=1.2.3"
-var version = "0.1.7"
+var version = "0.2.0"
 
 func main() {
 	cfgPath := flag.String("config", "configs/agent.yaml", "path to config file")
@@ -29,6 +29,11 @@ func main() {
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
+	}
+	// One startup line so operators can see which address "auto" picked; it is
+	// what they must register in the backend (or check with ss -lntp).
+	if cfg.ListenAuto {
+		log.Printf("listen_addr: auto -> %s", cfg.ListenAddr)
 	}
 
 	engine := exec.New(cfg)
@@ -49,7 +54,8 @@ func main() {
 	}()
 
 	go func() {
-		log.Printf("agent %s listening on %s (work_dir=%s)", version, cfg.Addr(), cfg.WorkDir)
+		// Routine starts/stops are intentionally not logged: the agent writes
+		// only errors, so journald stays small on managed hosts.
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %v", err)
 		}
@@ -58,9 +64,7 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
-	log.Println("agent shutting down...")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(ctx)
-	log.Println("agent stopped")
 }

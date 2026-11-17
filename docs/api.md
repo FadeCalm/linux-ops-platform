@@ -5,9 +5,9 @@
 - **管理后端**：浏览器与 curl 使用，前缀 `/api/v1`
 - **Agent**：仅由后端调用（也可用于排障），前缀 `/api/v1`，默认端口 `19090`
 
-> 管理后端在配置了 `auth.access_password` 时要求先登录（见 §2.0），其余接口
-> 均需携带会话 Cookie；Agent 的 19090 端口没有任何认证。请勿在公网暴露任何
-> 端口。所有示例都假设本机访问。
+> 管理后端要求先登录（见 §2.0），其余接口均需携带会话 Cookie；Agent 的
+> 19090 端口没有请求认证，只接受 `allowed_ips` 中列出的来源 IP/CIDR，其他来源
+> 一律返回 403。请勿在公网暴露任何端口。所有示例都假设从白名单主机访问。
 
 ## 1. 通用约定
 
@@ -71,29 +71,90 @@
 
 ## 2. 后端 API
 
-### 2.0 登录（统一访问口令）
+### 2.0 登录与账号
 
-配置了 `auth.access_password` 后，除 `GET /api/v1/health` 与下列三个接口外，
-所有 `/api/v1` 路径（含 WebSocket 握手）都要求携带登录 Cookie；未登录返回
-`401 {"code":401,"message":"请先登录"}`。
+除 `GET /api/v1/health` 与下列登录/换令牌接口外，所有 `/api/v1` 路径（含
+WebSocket 握手）都要求认证。三种凭证任选其一：
+
+- 浏览器：`lop_session` Cookie（HttpOnly + SameSite=Lax）
+- 脚本：`Authorization: Bearer <JWT>`（短期，`POST /auth/token` 换取）
+- 脚本/第三方：`Authorization: Bearer lop_...`（API 令牌，页面创建与吊销）
+
+未认证返回 `401 {"code":401,"message":"未认证：请先登录或提供有效令牌"}`。
+权限不足返回 `403 {"code":403,"message":"需要管理员权限"}` 或资源归属不匹配的 403。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/auth/status` | 返回 `{required, authenticated}`，前端每次路由跳转前调用 |
-| POST | `/api/v1/auth/login` | 请求体 `{password}`；成功时下发 `lop_session` Cookie |
-| POST | `/api/v1/auth/logout` | 清除 Cookie |
+| GET | `/api/v1/auth/status` | 返回 `{required, authenticated, user?}`；Cookie 或 Bearer 均可 |
+| POST | `/api/v1/auth/login` | 请求体 `{username, password}`；成功时下发 `lop_session` Cookie |
+| POST | `/api/v1/auth/token` | 请求体 `{username, password}`；返回短期 JWT（不设置 Cookie） |
+| POST | `/api/v1/auth/logout` | 撤销当前 Cookie 会话并清除 Cookie（不影响 JWT/API 令牌） |
+| POST | `/api/v1/auth/password` | 已登录用户改密，请求体 `{old_password, new_password}` |
 
 ```bash
-curl -c cookie.txt -X POST http://127.0.0.1:8080/api/v1/auth/login \
-  -H 'Content-Type: application/json' -d '{"password":"你的密码"}'
-curl -b cookie.txt http://127.0.0.1:8080/api/v1/servers
+curl -c cookie.txt -X POST http://127.0.0.1:8089/api/v1/auth/login \
+  -H 'Content-Type: application/json' -d '{"username":"admin","password":"changeme"}'
+curl -b cookie.txt http://127.0.0.1:8089/api/v1/servers
+
+# 短期 JWT（默认 120 分钟，由 auth.jwt_minutes 控制）
+JWT=$(curl -s -X POST http://127.0.0.1:8089/api/v1/auth/token \
+  -H 'Content-Type: application/json' -d '{"username":"admin","password":"changeme"}' \
+  | sed -E 's/.*"access_token":"([^"]+)".*/\1/')
+curl -H "Authorization: Bearer $JWT" http://127.0.0.1:8089/api/v1/servers
 ```
 
-- Cookie 是 HMAC-SHA256 签名的时间戳（`session_hours`，默认 12 小时），无服务端
-  会话存储；修改密码会让所有旧会话立即失效。
-- 登录失败按 IP 限流：每分钟 10 次，超出返回 `429`。
-- 退出登录只清除浏览器 Cookie；已泄露的 Token 在过期前仍可重放。
-- 这是单一口令的访问门槛，不是多用户身份认证，也没有审计意义上的操作人区分。
+- 首次启动自动创建 `admin`：密码取 `auth.access_password`，留空则为 `changeme`；
+  之后密码只存数据库，配置项不再覆盖。请在首次登录后立即修改。
+- Cookie 是随机 Token，数据库只保存其 SHA-256；会话有效期为 `session_hours`
+  （默认 12 小时）。改密会撤销该用户的全部旧会话，再为当前浏览器下发新 Cookie。
+- JWT 为 HS256 签名，claims 含 `sub/usr/role/pv/iss/iat/exp`，有效期默认 120 分钟
+  （`auth.jwt_minutes`）。`pv` 是密码哈希的指纹：改密后旧 JWT 立即失效。签名密钥
+  `auth.jwt_secret` 留空时首次启动自动生成并存入 `app_settings`；更换密钥会让所有
+  未过期 JWT 失效。JWT 无刷新机制，过期后重新调用 `/auth/token`。
+- API 令牌形如 `lop_<43 字符>`，数据库只保存 SHA-256 与用于展示的前缀；明文只在
+  创建响应中出现一次。令牌权限等同于创建者账号（管理员令牌可管理全部；子用户
+  令牌只能访问自己名下的服务器）。管理员重置密码或删除账号会吊销该用户全部令牌；
+  用户自助改密不会吊销 API 令牌（脚本凭证与登录口令分开管理）。
+- 登录/换 JWT 失败按 IP 限流：每分钟 10 次，超出返回 `429`；失败不会透露用户名
+  是否存在，并固定延迟 300ms。
+- 角色只有 `admin` 和 `user` 两种：管理员可见全部服务器/任务/审计；子用户只能
+  访问归属自己（`owner_id`）的资源，跨账号访问返回 403。
+- 明文 HTTP 下 Cookie、JWT 与 API 令牌都可被内网抓包，这不是生产级认证方案。
+
+### 2.0.1 API 令牌管理
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/v1/auth/tokens` | 当前账号的令牌；管理员可加 `?user_id=N` 查看指定用户 |
+| POST | `/api/v1/auth/tokens` | 创建令牌，请求体 `{name, expires_in_days}`；`0` 表示永不过期 |
+| DELETE | `/api/v1/auth/tokens/{id}` | 吊销令牌；本人或管理员 |
+
+```bash
+# 用 Cookie 会话创建（明文 token 只在这次响应里出现）
+curl -b cookie.txt -X POST http://127.0.0.1:8089/api/v1/auth/tokens \
+  -H 'Content-Type: application/json' -d '{"name":"backup-script","expires_in_days":90}'
+
+# 之后脚本直接携带令牌
+curl -H "Authorization: Bearer lop_xxx" http://127.0.0.1:8089/api/v1/servers
+```
+
+- 每个账号最多 20 个令牌；响应中的 `item` 不含明文，`prefix` 仅用于列表展示。
+- `last_used_at` 最多每 5 分钟更新一次，避免高频脚本放大数据库写入。
+- 创建/吊销会写入审计事件 `token.create` / `token.revoke`。
+
+### 2.0.2 用户管理（仅管理员）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/v1/users` | 用户列表，含 `role`、`server_count`、`created_by` |
+| POST | `/api/v1/users` | 新建子用户，请求体 `{username, password}`；用户名 3–32 位 `[A-Za-z0-9_.-]` |
+| PUT | `/api/v1/users/{id}/password` | 重置指定用户密码（不能重置自己），并撤销其全部会话与 API 令牌 |
+| DELETE | `/api/v1/users/{id}` | 删除子用户（同时删除其会话与令牌）；名下仍有服务器时返回 409，不能删除自己或管理员 |
+
+```bash
+curl -b cookie.txt -X POST http://127.0.0.1:8089/api/v1/users \
+  -H 'Content-Type: application/json' -d '{"username":"alice","password":"至少6位"}'
+```
 
 ### 2.1 健康与概览
 
@@ -156,6 +217,11 @@ curl -b cookie.txt http://127.0.0.1:8080/api/v1/servers
 }
 ```
 
+- 响应带 `owner_id` / `owner_name`。新建服务器的归属固定为当前登录账号；
+  子用户只能列出、读取和修改自己名下的服务器（直接访问他人 ID 返回 403），
+  管理员可访问全部
+- 批量接口（健康检查、Agent 更新检查/升级）中只要包含一台无权访问的服务器，
+  整个请求返回 403
 - `ip` 必填；`agent_port` 默认 `19090`
 - `name` 新增时可省略：后端会探测一次 Agent，成功则用其上报的 `hostname`
   作为名称，失败则暂用 `ip` 作为名称（服务器仍会创建，`status=offline`）
@@ -181,13 +247,15 @@ curl -b cookie.txt http://127.0.0.1:8080/api/v1/servers
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/groups` | 列出全部分组（不分页） |
-| POST | `/api/v1/groups` | 新建 `{name, description}` |
-| PUT | `/api/v1/groups/{id}` | 更新 `{name, description}` |
-| DELETE | `/api/v1/groups/{id}` | 删除；相关服务器的 `group_id` 置空 |
-| GET | `/api/v1/tags` | 列出全部标签（不分页） |
-| POST | `/api/v1/tags` | 新建 `{name}` |
-| DELETE | `/api/v1/tags/{id}` | 删除并清理关联 |
+| GET | `/api/v1/groups` | 列出全部分组（不分页，所有登录用户可读） |
+| POST | `/api/v1/groups` | 新建 `{name, description}`（仅管理员） |
+| PUT | `/api/v1/groups/{id}` | 更新 `{name, description}`（仅管理员） |
+| DELETE | `/api/v1/groups/{id}` | 删除；相关服务器的 `group_id` 置空（仅管理员） |
+| GET | `/api/v1/tags` | 列出全部标签（不分页，所有登录用户可读） |
+| POST | `/api/v1/tags` | 新建 `{name}`（仅管理员） |
+| DELETE | `/api/v1/tags/{id}` | 删除并清理关联（仅管理员） |
+
+分组与标签是全局配置；子用户可以使用，但不能增删改。
 
 ### 2.4 任务
 
@@ -226,8 +294,11 @@ Content-Type: application/json
 | `command` | 是 | 交给 `/bin/bash -c` 的脚本；受 `max_script_bytes` 限制 |
 | `work_dir` | 否 | 工作目录；空则使用 Agent 默认 |
 | `timeout_ms` | 否 | 默认 `default_timeout_ms`，超过 `max_timeout_ms` 会被截断 |
-| `server_ids` | 是 | 至少一个；重复 ID 自动去重 |
-| `idempotency_key` | 否 | 唯一键；已存在时直接返回原任务 |
+| `server_ids` | 是 | 至少一个；重复 ID 自动去重；必须全部属于当前账号（管理员除外），否则 403 |
+| `idempotency_key` | 否 | 唯一键；同一账号内重复时直接返回原任务，其他账号使用同一键返回 409 |
+
+任务的 `owner_id` / `owner_name` / `created_by` 记录创建者；子用户只能列出和操作
+自己的任务（含子任务、日志、取消、重试、WebSocket），管理员可访问全部。
 
 响应 200：
 
@@ -239,7 +310,8 @@ Content-Type: application/json
       "id": "6f0a...", "command": "uname -a && df -h", "work_dir": "/tmp",
       "timeout_ms": 30000, "status": "PENDING", "total": 2,
       "succeeded": 0, "failed": 0, "cancelled": 0,
-      "created_by": "anonymous", "created_at": "2026-11-06T10:00:00Z",
+      "created_by": "admin", "owner_id": 1, "owner_name": "admin",
+      "created_at": "2026-11-06T10:00:00Z",
       "finished_at": null
     },
     "targets": [
@@ -263,6 +335,9 @@ Content-Type: application/json
 | `server_id` | 包含该服务器子任务的任务 |
 | `from`, `to` | RFC 3339 时间范围 |
 | `page`, `page_size` | 分页 |
+
+子用户只能看到自己创建的任务；审计接口 `GET /api/v1/audit` 同理，子用户默认
+只能看到 `operator` 为自己的记录。
 
 #### 读日志分片
 
@@ -327,13 +402,16 @@ POST /api/v1/targets/{id}/retry
 GET /api/v1/audit?action=task.create&resource=task&page=1&page_size=20
 ```
 
-返回 `{items,total,page,page_size}`。`operator` 恒为 `anonymous`。
+返回 `{items,total,page,page_size}`。`operator` 为操作用户名（未登录动作记为
+`anonymous`）；子用户默认只能看到自己的记录。
 
 主要 action：
 
+`auth.login`、`auth.login.failed`、`auth.logout`、`auth.password.change`、
+`user.create`、`user.password.reset`、`user.delete`、
 `task.create`、`task.cancel`、`target.cancel`、`target.retry`、
 `server.create/update/delete`、`group.create/update/delete`、
-`tag.create/delete`。
+`tag.create/delete`、`terminal.open/close`。
 
 ---
 
@@ -368,14 +446,17 @@ GET /api/v1/audit?action=task.create&resource=task&page=1&page_size=20
 | POST | `/api/v1/agents/update` | 批量升级，body `{server_ids:[...]}` |
 
 升级流程：Agent 以匿名 `ListObjectsV2` 扫描 `update_base_url` 指向的桶，按
-`linux-ops-agent-<version>-linux-<arch>.tar.gz` 取高于自身的最大版本；若
+`wxgzt-ops-agent-<version>-linux-<arch>.tar.gz` 取高于自身的最大版本；若
 `manifest.json` 存在则一并参考，取两者中较高者，并优先采用 manifest 中的
 `notes`/`sha256`。校验和缺失时再查 `SHA256SUMS`；仍缺失则默认跳过校验
 （`update_require_checksum: true` 可强制要求）。随后下载 tarball → 校验
 SHA256 → 替换自身二进制（旧文件保留为 `agent.old`）→ `exec` 原地重启。
 
 因此发布新版本只需把命名正确的 tar.gz 放进桶里，不必手改 manifest；
-桶须允许匿名 `s3:ListBucket` + `s3:GetObject`。`/update/check` 额外返回
+桶须允许匿名 `s3:ListBucket` + `s3:GetObject`。注意当前发布流程把校验和写进
+`agent-install.sh`，桶里没有 `SHA256SUMS` 时自更新只能校验下载完整性；
+要强制校验需额外保留 `SHA256SUMS` 并开启 `update_require_checksum`。
+`/update/check` 额外返回
 `source`（`manifest` / `listing` / `manifest+listing`）与 `verified`。
 升级期间 Agent 会短暂不可用；有任务运行时 Agent 返回 `409`。
 
@@ -500,8 +581,14 @@ ws://<backend>/api/v1/ws/terminal/{serverId}
 
 ## 4. Agent API
 
-Agent 只被后端调用，也可用 curl 排障。Agent 返回裸 JSON（无 `code/data` 信封）。
-错误格式：
+Agent 只被后端调用，也可在**白名单主机**上用 curl 排障。Agent 返回裸 JSON
+（无 `code/data` 信封）。`allowed_ips` 之外的来源在进入路由前即返回：
+
+```json
+{ "error": "forbidden: source ip is not in allowed_ips" }
+```
+
+其余错误格式：
 
 ```json
 { "error": "task not found" }
@@ -513,7 +600,7 @@ Agent 只被后端调用，也可用 curl 排障。Agent 返回裸 JSON（无 `c
 |---|---|---|
 | GET | `/api/v1/health` | `{"status":"ok","uptime_sec":123}` |
 | GET | `/api/v1/info` | hostname/os/arch/version/running_tasks/max_concurrent |
-| GET | `/api/v1/version` | `{"version":"0.1.7"}` |
+| GET | `/api/v1/version` | `{"version":"0.2.0"}` |
 | POST | `/api/v1/tasks` | 提交任务（按 `task_id` 幂等） |
 | GET | `/api/v1/tasks/{id}` | 查询状态 |
 | GET | `/api/v1/tasks/{id}/logs` | 游标增量日志 |

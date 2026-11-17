@@ -12,11 +12,13 @@
 - 单机与批量命令执行（`bash -c`），实时 stdout/stderr、取消、超时、重试
 - 文件管理（浏览、编辑、上传、下载、重命名、删除）
 - 交互式终端（WebSocket + PTY + xterm.js）
-- Agent 在线升级（MinIO 制品桶按文件名发现新版本，SHA256 校验，原地重启）
-- 统一访问口令（进入平台前登录，非多用户认证）
-- 任务历史、日志回放与下载、审计
+- Agent 在线升级（MinIO 制品桶按文件名发现新版本，有校验和时做 SHA256 校验，原地重启）
+- 用户名/密码登录（bcrypt、服务端会话）、admin/user 角色、管理员管理子用户
+- 脚本认证：短期 JWT（`/auth/token`）与长期 API 令牌（页面创建/吊销、存哈希、可设过期）
+- 服务器与任务按账号归属隔离：管理员可见全部，子用户只见自己名下
+- 任务历史、日志回放与下载、带用户名的审计
 
-尚未实现：多用户/RBAC、mTLS、命令模板库（M5）、MinIO 大日志（M6）、高可用（M7）。
+尚未实现：细粒度 RBAC、令牌 scope、mTLS、命令模板库（M5）、MinIO 大日志（M6）、高可用（M7）。
 
 ## 2. 目录结构
 
@@ -27,7 +29,10 @@ linux-ops-platform/
 │   └── internal/
 │       ├── api/                 HTTP 路由与 handler
 │       │   ├── router.go        路由注册、中间件（CORS/请求体限制/鉴权/审计）
-│       │   ├── auth.go          访问口令、会话 Cookie、登录限流
+│       │   ├── auth.go          账号登录、会话 Cookie、JWT 签发、登录限流
+│       │   ├── jwt.go           内置 HS256 JWT 签发/校验
+│       │   ├── tokens.go        API 令牌签发/列表/吊销
+│       │   ├── users.go         子用户管理（仅管理员）
 │       │   ├── tasks.go         任务创建/查询/取消/重试
 │       │   ├── servers.go       服务器 CRUD、批量健康检查、心跳
 │       │   ├── groups.go        分组
@@ -103,11 +108,12 @@ linux-ops-platform/
 ├── docs/                        架构、API、部署、进度、本文件
 ├── bin/                         构建产物与发布包（gitignore）
 │   ├── backend(.exe)            后端二进制
-│   ├── agent / agent-linux-amd64  Agent 二进制
-│   ├── linux-ops-agent-<ver>-linux-amd64.tar.gz  发布包
-│   ├── minio_upload.py          发布工具：上传包 + 生成 manifest/SHA256SUMS + 桶策略
+│   ├── wxgzt-ops / wxgzt-ops-linux-amd64  Agent 二进制
+│   ├── wxgzt-ops-agent-<ver>-linux-amd64.tar.gz  Agent 发布包
+│   ├── release/                 Agent 制品（上传 MinIO）+ server/ 管理端部署包
+│   ├── minio_upload.py          发布工具：上传包 + 渲染安装脚本（内置地址/校验和）+ 桶策略
 │   ├── smoke_e2e.py             端到端脚本
-│   └── pkg/linux-ops-agent/     发布包内容（agent、agent.yaml、service、README）
+│   └── pkg/wxgzt-ops/     发布包内容（agent、agent.yaml、service、agent-install.sh、README）
 └── linux-ops-platform-ai-spec.md  原始需求规格
 ```
 
@@ -120,11 +126,11 @@ linux-ops-platform/
 |---|---|---|---|
 | `configs/backend.yaml` | 后端 | 是（模板） | 监听地址、MySQL、MinIO、调度、WebSocket、访问口令；口令留空 |
 | `configs/local.yaml` | 本机后端 + `bin/minio_upload.py` | **否** | 含明文 MySQL/MinIO 口令；开发机联调用 |
-| `configs/agent.yaml` | Agent | 是 | 监听、并发、终端、自更新地址 |
-| `bin/pkg/linux-ops-agent/agent.yaml` | 发布包内 Agent | 否（bin 整体忽略） | 与 `configs/agent.yaml` 内容一致，打包时复制 |
+| `configs/agent.yaml` | Agent | 是 | 监听、`allowed_ips`、并发、终端、自更新地址 |
+| `bin/pkg/wxgzt-ops/agent.yaml` | 发布包内 Agent | 否（bin 整体忽略） | 与 `configs/agent.yaml` 内容一致，打包时复制；安装后即 `/opt/wxgzt-ops/agent.yaml` |
 | `deploy/.env` | `docker compose` + `scripts/install.sh` | **否** | MySQL/MinIO 口令、`ACCESS_PASSWORD` |
 | `deploy/.env.example` | 人工复制 | 是（模板） | 同上，占位值 |
-| `deploy/systemd/*.service` | systemd | 是 | `EnvironmentFile` 指向 `/etc/linux-ops/*.env` |
+| `deploy/systemd/*.service` | systemd | 是 | `EnvironmentFile` 指向 `/etc/wxgzt-ops/*.env` |
 | `frontend/.env.example` | Vite 构建 | 是（模板） | `VITE_BASE_PATH`、`VITE_API_BASE`，不含密钥 |
 | `frontend/.env.local` | Vite 构建 | **否** | 本机构建前缀，覆盖 example |
 | `deploy/nginx*.conf.example` | nginx | 是（模板） | 同域/自定义前缀反向代理，需透传 Upgrade |
@@ -151,17 +157,19 @@ linux-ops-platform/
 
 | 模块 | 能力 | 前端入口 | 主要实现 | 状态 |
 |---|---|---|---|---|
-| 登录 | 统一访问口令、12h 会话、登录限流、退出 | `/login` | `backend/internal/api/auth.go`、`frontend/src/views/Login.vue` | 已实现，本机验证 |
-| 概览 | 在线/离线数、Agent 版本分布、近期任务、成功率 | `/dashboard` | `backend/internal/api/router.go` `Overview` | 已实现 |
-| 服务器管理 | 增删改查、名称可留空自动取主机名、分组、标签、搜索、批量健康检查、Agent 信息 | `/servers` | `servers.go`、`groups.go`、`tags.go` | 已实现，真实主机验证 |
+| 登录 | 用户名/密码（bcrypt）、12h 服务端会话、登录限流、自助改密、退出 | `/login` | `backend/internal/api/auth.go`、`frontend/src/views/Login.vue` | 已实现，本机验证 |
+| 令牌 | 短期 JWT（`POST /auth/token`）；API 令牌创建/吊销、前缀与最后使用展示、过期时间 | 顶栏「令牌」 | `auth.go`、`jwt.go`、`tokens.go`、`App.vue` | 已实现，本机验证 |
+| 用户管理 | 管理员创建子用户、重置密码、删除；查看/吊销子用户令牌；显示名下服务器数 | `/users` | `users.go`、`permissions.go`、`Users.vue` | 已实现，本机验证 |
+| 概览 | 在线/离线数、Agent 版本分布、近期任务、成功率（按归属过滤） | `/dashboard` | `backend/internal/api/router.go` `Overview` | 已实现 |
+| 服务器管理 | 增删改查、归属账号标识、名称可留空自动取主机名、分组、标签、搜索、批量健康检查、Agent 信息 | `/servers` | `servers.go`、`groups.go`、`tags.go`、`permissions.go` | 已实现，真实主机验证 |
 | 批量执行 | 多机选择、命令/目录/超时、实时输出、取消、重试、下载日志 | `/execute` | `tasks.go`、`scheduler/`、`ws.go`、`logstore/` | 已实现，Linux 验证 |
 | 单机执行 | 快捷命令、实时输出、最近任务、取消/重试 | `/servers/:id/execute` | `ServerExec.vue`、`tasks.go` | 已实现 |
 | 文件管理 | 目录浏览、编辑保存（冲突检测）、分片上传、Range 下载、重命名、递归删除 | `/files` | `backend/internal/api/fs.go`、`agent/internal/api/fs.go` | 已实现 |
 | 交互终端 | xterm.js + PTY、cd/vim/top、Ctrl+C、窗口缩放、空闲/最长时长限制 | `/terminal` | `terminal.go`（两端）、`agent/internal/term/` | 已实现，Linux 验证 |
-| Agent 升级 | 桶扫描发现版本、SHA256 校验、备份 `agent.old`、exec 原地重启、单台/批量 | `/servers` | `agent/internal/update/`、`agentupdate.go`、`Servers.vue` | 已实现，真实主机验证 |
+| Agent 升级 | 桶扫描发现版本、有校验和时做 SHA256 校验、备份 `agent.old`、exec 原地重启、单台/批量 | `/servers` | `agent/internal/update/`、`agentupdate.go`、`Servers.vue` | 已实现，真实主机验证 |
 | 任务历史 | 状态/主机/时间筛选、分页、详情、日志回放、取消/重试/下载 | `/history` | `tasks.go`、`History.vue` | 已实现 |
 | 可靠性 | 幂等键、进程组终止、超时、后端重启恢复、WS 断线重放 | — | `scheduler/state.go`、`ws/hub.go` | 已实现，含单元测试 |
-| 审计 | 任务与资源操作记录（operator 恒为 `anonymous`） | `/history` 审计接口 | `router.go` `audit()` | 已实现 |
+| 审计 | 任务与资源操作记录（含操作用户名；子用户仅见自己的记录） | `/history` 审计接口 | `router.go` `audit()` | 已实现 |
 
 接口路径与请求/响应格式见 [api.md](api.md)。
 
@@ -178,8 +186,10 @@ linux-ops-platform/
 
 ## 6. 已知限制
 
-- 访问口令是单一口令，无用户区分、无权限模型；链路仍为明文 HTTP。
-- 退出登录不吊销已签发的 Cookie（无服务端会话），泄露的 Token 在有效期内可用。
+- 权限只有 admin/user 两级和按账号归属隔离，没有更细的 RBAC 或令牌 scope。
+- 链路仍为明文 HTTP：Cookie、JWT、API 令牌都可能被内网抓包。
+- 退出登录只撤销当前 Cookie 会话；已签发的 JWT 在到期前仍有效（改密可立即失效），
+  API 令牌需在页面手动吊销。
 - 输出按 300ms 轮询拉取；跨块 UTF-8 字符可能显示为 `�`。
 - Agent 任务记录在内存中，Agent 重启后历史丢失（后端保守标 `UNKNOWN`）。
 - 日志落本地磁盘，需自行清理；MinIO 只用于 Agent 制品，尚未承载任务日志。

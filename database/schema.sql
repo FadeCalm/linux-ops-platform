@@ -6,12 +6,75 @@
 --      mysql.auto_migrate=false. Do not combine both for the same database
 --      unless you accept GORM's additional indexes/constraints.
 --
--- Phase 1 deliberately creates NO authentication tables (sys_users, sys_roles,
--- sys_permissions, tokens, certificates). See docs/architecture.md.
+-- Accounts: username/password (bcrypt) with two roles, admin and user. Sessions
+-- are server-side and store only the SHA-256 of the cookie token. This is still
+-- not a full RBAC design; see docs/architecture.md.
+--
+-- This file is DDL only and intentionally contains no accounts. The bootstrap
+-- `admin` row is created by the backend on first start (database.Seed) when
+-- mysql.seed=true: the password is auth.access_password / ACCESS_PASSWORD, or
+-- "changeme" when unset. Keep seed=true for the first boot; the seed is
+-- idempotent and never overwrites an existing admin. With seed=false, insert an
+-- admin row yourself (bcrypt hash) or no one can log in.
 
 CREATE DATABASE IF NOT EXISTS linux_ops
   CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE linux_ops;
+
+-- ---------------------------------------------------------------------------
+-- accounts & sessions
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS users (
+  id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  username      VARCHAR(64) NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  role          VARCHAR(16) NOT NULL DEFAULT 'user',
+  created_by    VARCHAR(64) NOT NULL DEFAULT '',
+  created_at    DATETIME(3) NOT NULL,
+  updated_at    DATETIME(3) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_users_username (username),
+  KEY idx_users_role (role)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+  id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  token_hash CHAR(64) NOT NULL,
+  user_id    BIGINT UNSIGNED NOT NULL,
+  expires_at DATETIME(3) NOT NULL,
+  created_at DATETIME(3) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_user_sessions_token (token_hash),
+  KEY idx_user_sessions_user (user_id),
+  KEY idx_user_sessions_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Long-lived bearer tokens for scripts (Authorization: Bearer lop_...).
+-- Only the SHA-256 is stored; expires_at NULL means no expiry.
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  user_id      BIGINT UNSIGNED NOT NULL,
+  username     VARCHAR(64) NOT NULL DEFAULT '',
+  name         VARCHAR(64) NOT NULL,
+  token_hash   CHAR(64) NOT NULL,
+  prefix       VARCHAR(16) NOT NULL DEFAULT '',
+  expires_at   DATETIME(3) NULL,
+  last_used_at DATETIME(3) NULL,
+  created_at   DATETIME(3) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_api_tokens_hash (token_hash),
+  KEY idx_api_tokens_user (user_id),
+  KEY idx_api_tokens_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Small server-side settings that must survive restarts. The only row today is
+-- the auto-generated JWT signing secret (never exposed by the API).
+CREATE TABLE IF NOT EXISTS app_settings (
+  name       VARCHAR(64) NOT NULL,
+  value      TEXT NOT NULL,
+  updated_at DATETIME(3) NOT NULL,
+  PRIMARY KEY (name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
 -- groups & tags
@@ -49,12 +112,15 @@ CREATE TABLE IF NOT EXISTS servers (
   group_id          BIGINT UNSIGNED NULL,
   status            VARCHAR(32) NOT NULL DEFAULT 'unknown',
   agent_version     VARCHAR(64) NOT NULL DEFAULT '',
+  owner_id          BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  owner_name        VARCHAR(64) NOT NULL DEFAULT '',
   last_heartbeat_at DATETIME(3) NULL,
   created_at        DATETIME(3) NOT NULL,
   updated_at        DATETIME(3) NOT NULL,
   PRIMARY KEY (id),
   KEY idx_servers_group (group_id),
   KEY idx_servers_status (status),
+  KEY idx_servers_owner (owner_id),
   CONSTRAINT fk_servers_group FOREIGN KEY (group_id) REFERENCES server_groups (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -96,12 +162,15 @@ CREATE TABLE IF NOT EXISTS execution_tasks (
   cancelled       INT NOT NULL DEFAULT 0,
   idempotency_key VARCHAR(128) NULL,
   created_by      VARCHAR(64) NOT NULL DEFAULT 'anonymous',
+  owner_id        BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  owner_name      VARCHAR(64) NOT NULL DEFAULT '',
   created_at      DATETIME(3) NOT NULL,
   finished_at     DATETIME(3) NULL,
   PRIMARY KEY (id),
   UNIQUE KEY uk_exec_tasks_idem (idempotency_key),
   KEY idx_exec_tasks_status (status),
-  KEY idx_exec_tasks_created (created_at)
+  KEY idx_exec_tasks_created (created_at),
+  KEY idx_exec_tasks_owner (owner_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS execution_task_targets (
@@ -145,7 +214,7 @@ CREATE TABLE IF NOT EXISTS execution_log_indexes (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
--- audit (operator is always 'anonymous' in phase 1; never forged)
+-- audit (operator is the authenticated username, or 'anonymous'; never forged)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS audit_events (
   id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

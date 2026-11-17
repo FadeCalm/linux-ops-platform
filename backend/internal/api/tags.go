@@ -33,7 +33,7 @@ func (h *Handlers) CreateTag(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	h.audit("tag.create", "tag", strconv.FormatInt(t.ID, 10), t.Name)
+	h.audit(c, "tag.create", "tag", strconv.FormatInt(t.ID, 10), t.Name)
 	ok(c, t)
 }
 
@@ -51,6 +51,6 @@ func (h *Handlers) DeleteTag(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	h.audit("tag.delete", "tag", strconv.FormatInt(id, 10), "")
+	h.audit(c, "tag.delete", "tag", strconv.FormatInt(id, 10), "")
 	ok(c, gin.H{"deleted": true})
 }

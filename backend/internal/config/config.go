@@ -34,13 +34,19 @@ type SchedulerConfig struct {
 	AgentRequestTimeoutS int   `yaml:"agent_request_timeout_sec"`
 }
 
-// AuthConfig gates the whole UI/API behind one shared access password. This is
-// deliberately not user management: it stops casual access on an isolated
-// network, nothing more. Empty AccessPassword disables the gate.
+// AuthConfig controls login sessions, bearer tokens and the bootstrap admin
+// password. AccessPassword is only used when the admin account does not exist
+// yet; an empty value seeds "changeme". It no longer disables authentication.
 type AuthConfig struct {
 	AccessPassword string `yaml:"access_password"`
-	// SessionHours is the lifetime of a login cookie.
+	// SessionHours is the lifetime of a browser login cookie.
 	SessionHours int `yaml:"session_hours"`
+	// JWTSecret signs short-lived bearer tokens for API clients. When empty a
+	// random key is generated on first start and persisted in app_settings, so
+	// tokens survive restarts. Set JWT_SECRET to rotate it.
+	JWTSecret string `yaml:"jwt_secret"`
+	// JWTMinutes is the lifetime of an issued JWT (default 120).
+	JWTMinutes int `yaml:"jwt_minutes"`
 }
 
 type WebSocketConfig struct {
@@ -76,14 +82,14 @@ type Config struct {
 
 func Default() *Config {
 	return &Config{
-		ListenAddr:  "127.0.0.1:8080",
+		ListenAddr:  "127.0.0.1:8089",
 		AllowOrigin: "*",
 		LogDir:      "./data/logs",
 		MySQL: MySQLConfig{
 			Host: "127.0.0.1", Port: 3306, User: "ops", DBName: "linux_ops",
 			MaxOpenConns: 20, MaxIdleConns: 5, AutoMigrate: true,
 		},
-		MinIO: MinIOConfig{Bucket: "linux-ops-agent"},
+		MinIO: MinIOConfig{Bucket: "wxgzt-ops"},
 		Scheduler: SchedulerConfig{
 			HeartbeatIntervalSec: 20,
 			DispatchConcurrency:  8,
@@ -95,7 +101,7 @@ func Default() *Config {
 			AgentRequestTimeoutS: 10,
 		},
 		WebSocket: WebSocketConfig{MaxConnections: 200, ReplayBufferLen: 2000, MaxTerminalSessions: 16},
-		Auth:      AuthConfig{SessionHours: 12},
+		Auth:      AuthConfig{SessionHours: 12, JWTMinutes: 120},
 	}
 }
 
@@ -160,6 +166,32 @@ func applyEnv(cfg *Config) {
 			cfg.Auth.SessionHours = n
 		}
 	}
+	if v := os.Getenv("JWT_SECRET"); v != "" {
+		cfg.Auth.JWTSecret = v
+	}
+	if v := os.Getenv("JWT_MINUTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Auth.JWTMinutes = n
+		}
+	}
+	// MinIO settings mirror bin/minio_upload.py so one environment file works
+	// for both. The backend itself does not read objects yet; these values
+	// keep the deployment configuration in one place.
+	if v := os.Getenv("MINIO_ENDPOINT"); v != "" {
+		cfg.MinIO.Endpoint = v
+	}
+	if v := os.Getenv("MINIO_ACCESS_KEY"); v != "" {
+		cfg.MinIO.AccessKey = v
+	}
+	if v := os.Getenv("MINIO_SECRET_KEY"); v != "" {
+		cfg.MinIO.SecretKey = v
+	}
+	if v := os.Getenv("MINIO_BUCKET"); v != "" {
+		cfg.MinIO.Bucket = v
+	}
+	if v := os.Getenv("MINIO_UPDATE_BASE_URL"); v != "" {
+		cfg.MinIO.UpdateBaseURL = v
+	}
 }
 
 func (c *Config) Validate() error {
@@ -194,6 +226,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Auth.SessionHours <= 0 {
 		c.Auth.SessionHours = 12
+	}
+	if c.Auth.JWTMinutes <= 0 {
+		c.Auth.JWTMinutes = 120
+	}
+	if c.Auth.JWTMinutes > 1440 {
+		c.Auth.JWTMinutes = 1440
 	}
 	return nil
 }

@@ -11,6 +11,7 @@ import Files from '@/views/Files.vue'
 import ServerExec from '@/views/ServerExec.vue'
 import TerminalPick from '@/views/TerminalPick.vue'
 import Terminal from '@/views/Terminal.vue'
+import Users from '@/views/Users.vue'
 
 Vue.use(Router)
 
@@ -26,7 +27,8 @@ const router = new Router({
     { path: '/files', name: 'files', component: Files, meta: { title: '文件管理', icon: 'el-icon-folder-opened' } },
     { path: '/terminal', name: 'terminal-pick', component: TerminalPick, meta: { title: '交互终端', icon: 'el-icon-connection' } },
     { path: '/servers/:id/terminal', name: 'terminal', component: Terminal, meta: { title: '交互终端', icon: 'el-icon-connection' } },
-    { path: '/history', name: 'history', component: History, meta: { title: '任务历史', icon: 'el-icon-document' } }
+    { path: '/history', name: 'history', component: History, meta: { title: '任务历史', icon: 'el-icon-document' } },
+    { path: '/users', name: 'users', component: Users, meta: { title: '用户管理', icon: 'el-icon-user', admin: true } }
   ]
 })
 
@@ -36,11 +38,12 @@ const router = new Router({
 router.beforeEach(async (to, from, next) => {
   if (to.meta && to.meta.public) {
     if (to.name !== 'login') return next()
-    // Already logged in (or no password configured): skip the login page.
+    // Already logged in: skip the login page.
     try {
       const st = await api.auth.status()
       store.commit('setAuthRequired', !!st.required)
-      if (!st.required || st.authenticated) return next('/dashboard')
+      store.commit('setUser', st.user || null)
+      if (st.authenticated) return next('/dashboard')
     } catch (e) {
       // Backend unreachable: stay on the login page.
     }
@@ -50,7 +53,13 @@ router.beforeEach(async (to, from, next) => {
   try {
     const st = await api.auth.status()
     store.commit('setAuthRequired', !!st.required)
-    if (!st.required || st.authenticated) return next()
+    store.commit('setUser', st.user || null)
+    if (st.authenticated) {
+      if (to.meta.admin && (!st.user || st.user.role !== 'admin')) {
+        return next('/dashboard')
+      }
+      return next()
+    }
   } catch (e) {
     if (e && e.status === 401) {
       return next({ path: '/login', query: { redirect: to.fullPath } })

@@ -15,17 +15,23 @@
 
 ## ⚠️ 安全警告（务必阅读）
 
-**只有统一访问口令，不是真正的认证与授权。** 没有多用户账号、RBAC、JWT、
-API Token、Agent 认证、mTLS 或命令审批。知道口令的任何人都可以在受管主机上
-执行任意命令；口令和会话 Cookie 走明文 HTTP，内网可被抓包。
+**仍不是完整的认证与授权。** 平台现在有用户名/密码登录（bcrypt）、管理员与子用户
+两种角色、按归属隔离的服务器视图，以及短期 JWT 和长期 API 令牌（脚本用）；
+但依然没有 Agent 认证、mTLS、命令审批、细粒度 RBAC 或多因素认证。账号口令、
+会话 Cookie、JWT 和 API 令牌都走明文 HTTP，内网可被抓包；拿到管理员凭证就能在
+受管主机上执行任意命令。
 
-- 口令配置项：`auth.access_password`（或环境变量 `ACCESS_PASSWORD`），留空即关闭
+- 首次启动自动创建超级管理员：用户名 `admin`，初始密码取
+  `auth.access_password`（未配置时为 `changeme`）
+- 管理员可修改自己的密码、创建子用户、重置子用户密码；子用户只能看到并操作
+  自己名下的服务器，管理员可见全部服务器
 - 默认只监听 `127.0.0.1`
 - 跨机使用必须绑定**内网地址**，并用防火墙/安全组限制到管理网段
 - **严禁暴露到公网**
 - 本阶段**不是**生产安全配置；正式生产前必须先完成 M8 安全加固
 
-审计记录的 operator 恒为 `anonymous`，平台不提供伪造身份、绕过审计或隐藏痕迹的能力。
+审计记录会带上操作者用户名（未登录时为 `anonymous`），平台不提供伪造身份、
+绕过审计或隐藏痕迹的能力。
 
 ---
 
@@ -33,9 +39,11 @@ API Token、Agent 认证、mTLS 或命令审批。知道口令的任何人都可
 
 | 模块 | 能力 |
 |---|---|
-| 登录 | 统一访问口令、12 小时会话、登录失败限流、退出 |
-| 概览 | 服务器总数/在线/离线、Agent 版本分布、近期任务、成功率 |
-| 服务器管理 | 增删改查、名称留空自动取主机名、分组、标签、搜索、批量健康检查、Agent 信息 |
+| 登录 | 用户名/密码（bcrypt）、12 小时服务端会话、登录失败限流、自助改密、退出 |
+| 令牌 | 脚本认证：`POST /auth/token` 换短期 JWT；页面创建/吊销长期 API 令牌（存哈希、可设过期、记录最后使用） |
+| 用户管理 | 管理员创建子用户、重置密码、删除；服务器按归属账号隔离，管理员可见全部 |
+| 概览 | 服务器总数/在线/离线、Agent 版本分布、近期任务、成功率（子用户仅统计自己名下） |
+| 服务器管理 | 增删改查、归属账号标识、名称留空自动取主机名、分组、标签、搜索、批量健康检查、Agent 信息 |
 | 命令执行 | 多机选择、命令/工作目录/超时、实时 stdout/stderr、逐机标签页、取消/重试/下载 |
 | 单机执行 | 点击主机进入独立页面：快捷命令、实时输出、取消/重试、最近任务 |
 | 文件管理 | 目录浏览/切换、新建、编辑保存（并发冲突检测）、分片上传、下载（Range 断点）、重命名、递归删除 |
@@ -43,7 +51,7 @@ API Token、Agent 认证、mTLS 或命令审批。知道口令的任何人都可
 | Agent 升级 | 页面单台/批量检查与升级：扫描 MinIO 桶按文件名发现新版本、SHA256 校验、原地重启、保留 `agent.old` |
 | 任务历史 | 状态/服务器/时间筛选、分页、详情、日志回放、取消/重试/下载 |
 | 可靠性 | 幂等键、进程组终止、超时、后端重启恢复、WebSocket 断线重放 |
-| 审计 | 任务与资源操作记录（anonymous） |
+| 审计 | 任务与资源操作记录（含操作用户名；子用户默认只看到自己的记录） |
 
 ## 架构
 
@@ -103,11 +111,11 @@ sudo bash scripts/install.sh
 sudo bash scripts/install.sh --lan-ip 10.0.0.10
 
 # 3) 验证
-curl -sS http://127.0.0.1:8080/api/v1/health
+curl -sS http://127.0.0.1:8089/api/v1/health
 sudo bash tests/smoke.sh
 ```
 
-浏览器打开 `http://<服务器IP>:8080/`（本机为 `http://127.0.0.1:8080/`）。
+浏览器打开 `http://<服务器IP>:8089/`（本机为 `http://127.0.0.1:8089/`）。
 详细步骤、配置、备份、故障排查见 [docs/deployment.md](docs/deployment.md)。
 
 ## 本地开发
@@ -119,9 +127,10 @@ sudo bash tests/smoke.sh
 cp configs/backend.yaml configs/local.yaml   # 填写 mysql / minio 两段
 ```
 
-需要登录校验时，在 `configs/local.yaml` 的 `auth.access_password` 填一个口令
-（留空则跳过登录页）；启动时也可以用 `ACCESS_PASSWORD=... ./bin/backend ...`
-覆盖。
+`auth.access_password` 只用于初始化超级管理员 `admin` 的密码：数据库中不存在
+`admin` 时用该值（或环境变量 `ACCESS_PASSWORD`）创建，留空则使用 `changeme`。
+登录页始终要求用户名和密码；首次登录后请在右上角「密码」中修改。之后该配置项
+不再覆盖数据库中的密码。
 
 ```bash
 # 1) 基础设施（二选一）
@@ -136,7 +145,7 @@ cp configs/backend.yaml configs/local.yaml   # 填写 mysql / minio 两段
 cd agent
 go run . -config ../configs/agent.yaml
 
-# 4) 前端开发服务器（另一个终端，代理 /api 到 8080）
+# 4) 前端开发服务器（另一个终端，代理 /api 到 8089）
 cd frontend
 npm install
 npm run dev        # http://127.0.0.1:5173
@@ -185,14 +194,16 @@ VITE_BASE_PATH=/ops-wxgzt/ VITE_API_BASE=/ops-server/api/v1 npm run build
 - [docs/overview.md](docs/overview.md) — 目录结构、配置文件清单、功能清单
 - [docs/architecture.md](docs/architecture.md) — 架构、数据模型、状态机、恢复策略、演进设计
 - [docs/api.md](docs/api.md) — 后端 API、Agent API、WebSocket 协议
-- [docs/deployment.md](docs/deployment.md) — 安装、配置、安全清单、备份恢复、排障
+- [docs/deployment.md](docs/deployment.md) — 单机演示安装、配置、安全清单、备份恢复、排障
+- [docs/production-deploy.md](docs/production-deploy.md) — 生产部署：nginx + 现有 MySQL/MinIO、Agent 白名单安装、Agent 混淆构建
 - [docs/progress.md](docs/progress.md) — 已验证 / 待验证清单
 - [scripts/curl-examples.sh](scripts/curl-examples.sh) — 可直接复制的 curl 示例
 
 ## 已知限制
 
-- 仅有统一访问口令（`auth.access_password`），没有多用户账号与权限模型；仅限隔离网络
-- 无 TLS；链路为明文 HTTP
+- 账号体系只有 admin / user 两种角色和“按账号归属”的服务器隔离；没有细粒度 RBAC、令牌 scope 或多因素认证
+- 无 TLS；账号口令、会话 Cookie、JWT 与 API 令牌均为明文 HTTP，仅限隔离网络
+- Agent 没有请求认证，只靠 `allowed_ips` 来源白名单与防火墙；白名单主机仍可绕过平台直接执行命令
 - 输出为轮询拉取（默认 300ms），不是逐字节实时；M4 的 PTY 才提供真正实时交互
 - 日志按字节分块传输/读取，跨块边界的多字节 UTF-8 字符可能显示为替换符（`�`）
 - `/tmp` 在 systemd 沙箱中是服务私有目录；`/home`、`/root` 不可访问
@@ -208,4 +219,4 @@ VITE_BASE_PATH=/ops-wxgzt/ VITE_API_BASE=/ops-server/api/v1 npm run build
 | M5 | 命令模板库与版本 | 未开始 |
 | M6 | MinIO 大日志、Agent 包管理与升级 | 升级已完成；大日志未开始 |
 | M7 | 高可用与容量 | 未开始 |
-| M8 | 认证、RBAC、mTLS、审批、审计防篡改 | 未开始（当前仅有统一访问口令） |
+| M8 | 认证、RBAC、mTLS、审批、审计防篡改 | 未开始（当前有用户名/密码、JWT/API 令牌与 admin/user 两级角色） |

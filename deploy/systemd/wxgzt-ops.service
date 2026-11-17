@@ -1,0 +1,35 @@
+[Unit]
+Description=wxgzt-ops host agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The agent runs as root: it manages files, executes commands and opens
+# terminals for the whole host. This deployment does not create a dedicated
+# service user. Keep 19090 reachable only from the backend host(s).
+User=root
+Group=root
+WorkingDirectory=/opt/wxgzt-ops
+EnvironmentFile=-/etc/wxgzt-ops/agent.env
+# The config ships inside the agent tarball and is read from the install
+# directory, so a zero-argument "curl ... | sudo bash" needs no extra flags.
+ExecStart=/opt/wxgzt-ops/bin/wxgzt-ops -config /opt/wxgzt-ops/agent.yaml
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+NoNewPrivileges=true
+
+# Note: ProtectSystem/ProtectHome/PrivateTmp are intentionally NOT enabled.
+# As root the agent must be able to read and write the whole filesystem
+# (/etc, /home, /root, system /tmp) for file management and terminals.
+
+# Keep managed hosts quiet: routine output is discarded and only errors reach
+# journald, with rate limiting so a noisy client cannot fill the disk.
+StandardOutput=null
+StandardError=journal
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=50
+
+[Install]
+WantedBy=multi-user.target

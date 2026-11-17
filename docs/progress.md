@@ -82,21 +82,21 @@
 cd linux-ops-platform
 sudo bash scripts/install.sh --lan-ip <私网IP>
 sudo systemctl status linux-ops-agent linux-ops-backend --no-pager
-curl -sS http://127.0.0.1:8080/api/v1/health
+curl -sS http://127.0.0.1:8089/api/v1/health
 sudo bash tests/smoke.sh
 ```
 
 ### 3.2 取消
 
 ```bash
-TASK=$(curl -sS -X POST http://127.0.0.1:8080/api/v1/tasks \
+TASK=$(curl -sS -X POST http://127.0.0.1:8089/api/v1/tasks \
   -H 'Content-Type: application/json' \
   -d '{"command":"sleep 300","timeout_ms":600000,"server_ids":[1]}')
 echo "$TASK"
 # 从返回中取 task.id，然后：
-curl -sS -X POST http://127.0.0.1:8080/api/v1/tasks/<task-id>/cancel
+curl -sS -X POST http://127.0.0.1:8089/api/v1/tasks/<task-id>/cancel
 sleep 2
-curl -sS http://127.0.0.1:8080/api/v1/tasks/<task-id>
+curl -sS http://127.0.0.1:8089/api/v1/tasks/<task-id>
 ```
 
 期望：子任务 `CANCELLED`；服务器上 `pgrep -af 'sleep 300'` 无残留。
@@ -104,7 +104,7 @@ curl -sS http://127.0.0.1:8080/api/v1/tasks/<task-id>
 ### 3.3 超时
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8080/api/v1/tasks \
+curl -sS -X POST http://127.0.0.1:8089/api/v1/tasks \
   -H 'Content-Type: application/json' \
   -d '{"command":"sleep 30","timeout_ms":2000,"server_ids":[1]}'
 ```
@@ -115,7 +115,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/tasks \
 
 ```bash
 # 提交长任务后立即重启后端
-curl -sS -X POST http://127.0.0.1:8080/api/v1/tasks \
+curl -sS -X POST http://127.0.0.1:8089/api/v1/tasks \
   -H 'Content-Type: application/json' \
   -d '{"command":"for i in $(seq 1 30); do echo tick $i; sleep 1; done","timeout_ms":120000,"server_ids":[1]}'
 sudo systemctl restart linux-ops-backend
@@ -131,7 +131,7 @@ journalctl -u linux-ops-backend -n 20 --no-pager
 ```bash
 KEY="test-idem-$(date +%s)"
 for i in 1 2; do
-  curl -sS -X POST http://127.0.0.1:8080/api/v1/tasks \
+  curl -sS -X POST http://127.0.0.1:8089/api/v1/tasks \
     -H 'Content-Type: application/json' \
     -d "{\"command\":\"date +%s%N >> /var/lib/linux-ops/idem-proof; echo done\",\"server_ids\":[1],\"idempotency_key\":\"$KEY\"}"
   echo
@@ -139,8 +139,9 @@ done
 sudo wc -l /var/lib/linux-ops/idem-proof   # 应为 1
 ```
 
-> 注意：Agent 的 systemd 沙箱启用了 `PrivateTmp=true`，命令看到的 `/tmp`
-> 与宿主机 `/tmp` 不共享，因此这里用 `/var/lib/linux-ops` 做证明文件。
+> 注意：当时 Agent 的 systemd 沙箱启用了 `PrivateTmp=true`，命令看到的 `/tmp`
+> 与宿主机 `/tmp` 不共享，因此这里用 `/var/lib/linux-ops` 做证明文件。当前部署
+> 已改为 root 运行且不再启用 `PrivateTmp`，该验证结论本身仍成立。
 
 ### 3.6 更新本文档
 
@@ -182,7 +183,7 @@ sudo wc -l /var/lib/linux-ops/idem-proof   # 应为 1
 
 ## 五、2026-11-06 UI：黑白主题切换 + 单机执行页
 
-环境同上一节：后端 `127.0.0.1:8080`，Vite `127.0.0.1:5173`，受管主机
+环境同上一节：后端 `127.0.0.1:8089`，Vite `127.0.0.1:5173`，受管主机
 `47.99.2.212`（server id=2）。
 
 | # | 项目 | 验证方式 | 结果 |
@@ -242,7 +243,7 @@ MySQL 与 MinIO 连接信息统一到 `configs/local.yaml`（含口令，已加�
 | 5 | 前缀开发服务器 | 同参数 `npx vite --port 5174` | 通过，`/ops-wxgzt/` 返回 200，脚本路径 `/ops-wxgzt/@vite/client` |
 | 6 | 注入值 | 读取 dev server 转换后的 `base.js` | 通过，`BASE_URL=/ops-wxgzt/`、`VITE_API_BASE=ops-server/api/v1`（运行时补前导 `/`） |
 | 7 | 开发代理去前缀 | `GET :5174/ops-server/api/v1/health` | 200，剥掉 `/ops-server/api/v1` 后转发为后端 `/api/v1/health` |
-| 8 | 无前缀回归 | 原有 5173 dev server、`:8080` health | 200，未受影响 |
+| 8 | 无前缀回归 | 原有 5173 dev server、`:8089` health | 200，未受影响 |
 
 未验证 / 边界：
 
@@ -298,39 +299,221 @@ MySQL 与 MinIO 连接信息统一到 `configs/local.yaml`（含口令，已加�
   建议发布只用 `bin/minio_upload.py`，并保留 `SHA256SUMS`。
 - 仍未实现「后台定时发现 + 列表角标」，检测仍由页面手动触发。
 
-## 九、访问口令（进入首页前登录）
+## 九、多用户登录与服务器归属隔离（2026-11-11）
 
-实现（后端 `backend/internal/api/auth.go`、`config.AuthConfig`）：
+实现（后端 `auth.go` / `users.go` / `permissions.go`、前端 `Users.vue`）：
 
-- 配置项 `auth.access_password`（空 = 关闭）与 `auth.session_hours`（默认 12），
-  可用环境变量 `ACCESS_PASSWORD` / `SESSION_HOURS` 覆盖。
-- `POST /api/v1/auth/login` 恒定时间比较口令，成功后下发 HttpOnly 的
-  `lop_session` Cookie；Cookie 内容为 `过期时间.nonce.HMAC-SHA256`，密钥由
-  口令派生，因此无服务端会话表，改口令即让所有旧会话失效。
-- 除 `/health` 与三个 `auth/*` 接口外，`/api/v1` 全部路由（含 `/ws/*` 握手）
-  走 `requireAuth` 中间件；失败率按 IP 限流（10 次/分钟，超出 429）。
-- 前端新增 `/login` 路由与全屏登录页，路由守卫在每次跳转前调用
-  `/auth/status`；任意接口返回 401 时由 axios 拦截器跳回登录页并保留
-  `redirect`；顶栏在后端声明 `required=true` 时显示「退出」。
+- 账号：`users` 表，密码只存 bcrypt；角色 `admin` / `user`。首次启动自动创建
+  `admin`，初始密码取 `auth.access_password`（空则 `changeme`），之后配置项
+  不再覆盖数据库密码。
+- 会话：`user_sessions` 表只存 Cookie Token 的 SHA-256，HttpOnly Cookie
+  `lop_session`，有效期 `auth.session_hours`（默认 12 小时）。改密/重置密码
+  会撤销该用户全部旧会话，并为当前浏览器重新签发。
+- 接口：`POST /auth/login`（用户名+密码）、`POST /auth/logout`、
+  `POST /auth/password`（自助改密）、`/users` 下的列表/创建/重置/删除
+  （仅管理员）。登录失败按 IP 限流（10 次/分钟）。
+- 归属：`servers` 与 `execution_tasks` 增加 `owner_id` / `owner_name`；
+  子用户只能看到和操作自己名下的服务器、任务、日志、文件、终端与 WebSocket；
+  管理员可见全部。分组/标签为全局配置，只有管理员能增删改。
+- 历史数据：启动时把 `owner_id=0` 的服务器与任务回填给 `admin`。
+- 前端：登录页改为用户名+密码；顶栏显示当前用户与角色、修改密码、退出；
+  管理员多出「用户管理」页；服务器列表显示「归属账号」标识；子用户隐藏
+  分组/标签管理入口。
 
-验证（本机后端 127.0.0.1:8080，口令 `changeme`）：
+验证（本机 127.0.0.1:8089 + 真实 MySQL，`admin/changeme`）：
 
 | # | 场景 | 结果 |
 |---|---|---|
-| 1 | 未登录 `GET /api/v1/auth/status` | `{required:true, authenticated:false}` |
-| 2 | 未登录 `GET /api/v1/servers` | 401 |
-| 3 | 错误口令登录 | 401「密码错误」 |
-| 4 | 正确口令登录 | 200，Set-Cookie `lop_session` |
-| 5 | 携带 Cookie 访问 `/servers`、`/auth/status` | 200，`authenticated:true` |
-| 6 | 伪造/篡改 Cookie | 401 |
-| 7 | 连续 11 次错误口令 | 前 10 次 401，第 11 次 429 |
-| 8 | 登出 | Set-Cookie 过期，浏览器 Cookie 被清除 |
-| 9 | `GET /api/v1/health` | 200（保持公开，便于探活） |
+| 1 | 未登录访问 `/auth/status`、`/servers` | `authenticated:false`；401 |
+| 2 | `admin/changeme` 登录 | 200，下发 `lop_session` |
+| 3 | 管理员创建子用户 `tester01` | 200，`role=user` |
+| 4 | 子用户登录后列出服务器 | 空列表（看不到管理员的服务器） |
+| 5 | 子用户新增服务器 | 成功，`owner_id/owner_name` 为子用户 |
+| 6 | 管理员列出服务器 | 两台都可见，归属分别为 `admin` / `tester01` |
+| 7 | 子用户访问 `/users` | 403 |
+| 8 | 子用户直接访问/删除管理员服务器 | 403 |
+| 9 | 子用户自助改密后旧会话 | 旧会话失效，新 Cookie 可用，旧密码登录 401 |
+| 10 | 管理员重置子用户密码 / 删除子用户 | 成功；名下仍有服务器时删除被拒绝 |
 
 未覆盖 / 边界：
 
-- 链路仍是明文 HTTP：口令和 Cookie 在内网可被抓包，本功能只是访问门槛，
-  不替代 TLS 或真正的认证。
-- 退出登录不服务端吊销；Token 在过期前若已泄露仍可重放。
-- 哈希路由下直接打开 `#/login` 会先请求 `/auth/status`，后端不可达时停留在
-  登录页并提示后端离线。
+- 链路仍是明文 HTTP：账号密码和 Cookie 在内网可被抓包；没有 TLS/MFA。
+- 权限只有 admin/user 两级 + 归属过滤，没有细粒度 RBAC；子用户对自己名下
+  服务器拥有完整命令执行权限。
+- Agent 19090 端口无认证，拿到端口访问权即可绕过平台。
+- 审计记录带用户名，但数据库权限足够的人仍可修改；需外部日志留证。
+
+## 十、JWT 与 API 令牌（2026-11-11）
+
+实现（后端 `jwt.go` / `tokens.go` / `auth.go`、前端 `App.vue` / `Users.vue`）：
+
+- 统一鉴权：`requireAuth` 先看 `Authorization: Bearer`，再看 `lop_session`
+  Cookie。Bearer 为 `lop_` 开头时按 API 令牌查表；否则按 HS256 JWT 校验。
+- JWT：`POST /auth/token` 用用户名/密码换取（复用登录限流与失败延迟），
+  claims 含 `sub/usr/role/pv/iss/iat/exp`，有效期 `auth.jwt_minutes`（默认 120，
+  上限 1440）。`pv` 是密码哈希指纹，改密/重置后旧 JWT 立即 401。未配置
+  `auth.jwt_secret` 时首次启动自动生成并存入 `app_settings`，重启后仍可验证。
+- API 令牌：`GET/POST /auth/tokens`、`DELETE /auth/tokens/{id}`。格式
+  `lop_<43 字符>`，数据库只存 SHA-256 与展示前缀，明文仅创建响应出现一次；
+  可设 0–3650 天过期（0 = 永不过期），每人最多 20 个；管理员可查看/吊销他人
+  令牌；`last_used_at` 最多每 5 分钟更新。管理员重置密码或删除账号时吊销该用户
+  全部令牌；自助改密不吊销令牌。
+- 审计：`auth.token.issue`、`auth.token.failed`、`token.create`、`token.revoke`。
+- 前端：顶栏新增「令牌」对话框（创建、一次性明文复制、吊销、过期/最后使用）；
+  管理员在用户管理页可查看并吊销子用户令牌。
+
+验证（本机 127.0.0.1:8089 + 真实 MySQL）：
+
+| # | 场景 | 结果 |
+|---|---|---|
+| 1 | `POST /auth/token` 换取 JWT，Bearer 访问 `/users` | 200，返回管理员数据 |
+| 2 | 错误密码换取 JWT | 401，不泄露用户名是否存在 |
+| 3 | 篡改 JWT 签名 | 401 |
+| 4 | 无凭证访问受保护接口 | 401 |
+| 5 | 用 JWT 创建 API 令牌，Bearer 访问 `/servers` | 200 |
+| 6 | 吊销 API 令牌后再次访问 | 401（列表删除，立即生效） |
+| 7 | 子用户 JWT 列出服务器 | 空列表，归属隔离仍生效 |
+| 8 | 子用户自助改密后旧 JWT | 401 |
+| 9 | 子用户自助改密后其 API 令牌 | 仍可用（设计如此） |
+| 10 | 管理员重置该用户密码后其 API 令牌 | 401，且令牌记录被删除 |
+| 11 | 管理员 `?user_id=N` 查看他人令牌 / 删除用户 | 200 / 200 |
+
+未覆盖 / 边界：
+
+- JWT 与 API 令牌都是明文 HTTP 传输，内网可被抓包；没有 TLS、mTLS 或令牌 scope。
+- JWT 无刷新令牌，过期需重新调用 `/auth/token`；退出登录只撤销 Cookie 会话。
+- API 令牌权限完全等同创建者账号，不能限制为只读或限定服务器范围。
+- Bearer 仅用于 REST；浏览器 WebSocket 仍依赖 Cookie（脚本暂不能建 WS）。
+
+## 十一、生产部署、Agent 白名单与混淆构建（2026-11-11）
+
+实现：
+
+- Agent 新增 `allowed_ips`（IP/CIDR 列表），所有 REST/WebSocket 请求在路由前按
+  TCP 对端地址过滤，其他来源返回 403；不信任 `X-Forwarded-For`。
+- `config.Validate` 拒绝 `listen_addr` 为 `0.0.0.0`/`::`，拒绝空白名单和
+  `0.0.0.0/0`、`::/0`、`*` 等通配项；安装脚本同样在下载前拒绝。
+- 安装脚本重写：固定安装到 `/opt/wxgzt-ops`，服务名 `wxgzt-ops`，服务以
+  root 运行（不创建系统用户），配置 `/etc/wxgzt-ops/agent.yaml`；新增 `--base-url`、
+  `--listen-addr`、可重复的 `--allow-ip`；已预置配置文件时可直接用
+  `--config`，不再要求白名单参数；校验 SHA256；自动停用旧
+  `linux-ops-agent`；运行期不写日志文件，仅错误进 journald。
+- 发布命名统一为 `wxgzt-ops-agent-<ver>-linux-<arch>.tar.gz`；自更新同时兼容新
+  布局和旧包内的 `agent` 文件名；多架构桶中的 `manifest.json` 只对匹配架构
+  生效，避免把 amd64 包下发到 arm64。
+- 新增 `scripts/build-release.sh`：garble 字面量混淆 + `-trimpath` +
+  `-s -w`，同时构建后端与 Agent 的 linux amd64/arm64；生成 `SHA256SUMS`。
+- systemd unit 改为 `wxgzt-ops.service`、`wxgzt-ops-backend.service`；
+  Agent unit 设置 `StandardOutput=null`、`StandardError=journal` 并限速。
+- 后端新增 `MINIO_*` 环境变量覆盖（当前后端不直连 MinIO，变量与发布工具共用）。
+- 新增独立文档 `docs/production-deploy.md`（nginx + 现有 MySQL/MinIO、
+  Agent 白名单安装、升级回滚、排障与安全清单）。
+
+验证：
+
+| # | 场景 | 结果 |
+|---|---|---|
+| 1 | `go test ./...`（agent，含白名单/配置校验/更新解析） | 全部通过 |
+| 2 | `go test ./...`（backend） | 全部通过 |
+| 3 | `allowed_ips` 放行/拒绝、伪造 `X-Forwarded-For` | 单测通过：白名单外 403，XFF 不影响判定 |
+| 4 | `listen_addr=0.0.0.0`、空白名单、`0.0.0.0/0` | 配置校验返回错误 |
+| 5 | garble 构建 linux amd64/arm64 Agent 与后端 | 成功；`file` 显示 stripped ELF；二进制内无 `linux-ops-platform` 字符串 |
+| 6 | 发布包结构与 `SHA256SUMS` | `wxgzt-ops/{wxgzt-ops,agent.yaml,wxgzt-ops.service,agent-install.sh,README.md}`；校验和可解析 |
+| 7 | `bash -n` 安装/构建/安装器脚本 | 通过 |
+| 8 | 前端 `npm run build` | 成功，产物 `dist/ops-wxgzt/` |
+
+待验证（需真实 Linux 主机）：
+
+- 用 `curl | sudo bash` 实际安装，确认 systemd 启动、403 白名单、后端可访问。
+- 在 MinIO 上验证多架构发布、Agent 自更新与 `SHA256SUMS` 链路。
+- nginx 前缀反代 + WebSocket 的端到端验证。
+
+未覆盖 / 边界：
+
+- `allowed_ips` 是网络层兜底，不是请求认证；能伪造源 IP 或控制白名单主机的人
+  仍可执行命令。仍需防火墙/安全组。
+- garble 只提高反编译成本，不能把可执行 Go 程序真正“加密”。
+- 后端仍不直连 MinIO（`MINIO_*` 目前供发布工具和后续版本使用）。
+
+## 零参数安装与桶精简（2026-11-11）
+
+变更：
+
+- Agent 桶只保留 `wxgzt-ops-agent-<ver>-linux-<arch>.tar.gz` 和
+  `agent-install.sh`；不再上传 `manifest.json` / `SHA256SUMS`。
+- `bin/minio_upload.py` 渲染安装脚本时同时写入桶地址和本地 `SHA256SUMS`
+  内容，安装器下载后仍按 SHA256 校验安装包。
+- 安装器默认把包内 `agent.yaml` 安装为 `/opt/wxgzt-ops/agent.yaml`，systemd
+  unit 也改从这里读取；已有文件默认保留，`--force` 才覆盖，旧
+  `/etc/wxgzt-ops/agent.yaml` 自动迁移。
+- 包内 `update_base_url` 为回环占位值时，安装阶段改写为实际制品桶地址。
+- `curl -fsSL <url>/agent-install.sh | sudo bash` 不需要任何参数；`--config`、
+  `--listen-addr`、`--allow-ip` 仍作为可选项保留。
+
+验证：
+
+| # | 场景 | 结果 |
+|---|---|---|
+| 1 | `bash -n` 安装器/构建/安装脚本、Python 语法 | 通过 |
+| 2 | 模拟上传渲染 | 脚本内出现实际桶地址和两条构件的 SHA256；`bash -n` 通过 |
+| 3 | Agent 包内容 | `agent.yaml`、`agent-install.sh`(0755)、service、README、二进制齐全 |
+
+已知边界：
+
+- 桶里没有 `SHA256SUMS` 时，Agent 自更新无法比对发布校验和，包内配置使用
+  `update_require_checksum: false`；需要严格校验时必须额外保留 `SHA256SUMS`
+  并发安装包后重跑 `bin/minio_upload.py`。
+
+## 后端混淆导致表名不匹配（2026-11-11）
+
+现象：手动执行 `database/schema.sql` 后启动后端，报
+`select * from rd_yvyos` 之类的表不存在。
+
+原因（已用 garble/plain 对比构建验证）：
+
+- garble 会重命名导出的 Go 类型名和结构体字段名；
+- GORM 通过反射从这些标识符推导表名/列名，因此混淆后的后端会去查随机表名，
+  与手动创建的标准表名完全不一致。这不是数据库编码问题；`utf8mb4` 设置正确，
+  表名是纯 ASCII，编码错误不会把 `servers` 变成 `rd_yvyos`。
+
+修复：
+
+- `scripts/build-release.sh` 只对 Agent 使用 garble，后端改为普通
+  `go build -trimpath -s -w`；
+- 为 `Setting` / `ExecutionLogIndex` 增加显式 `TableName()`，分别固定为
+  `app_settings` / `execution_log_indexes`，使 AutoMigrate 与 `schema.sql`
+  完全一致（默认命名会生成 `settings` / `execution_log_indices`）；
+- 验证：用反射程序对比混淆/普通构建的表名与列名；修复后 12 张表、全部列名与
+  `database/schema.sql` 一致。
+
+已污染数据：若曾用混淆后端配 `auto_migrate=true` 启动，数据库中会出现
+`k_jv_ue_mg_lzs` 这类随机表；切换到普通构建前应删掉这些表，或直接在空库上重新
+执行 `schema.sql`。
+
+## Agent 监听地址自动化（2026-11-13）
+
+问题：`agent.yaml` 固定 `listen_addr: "127.0.0.1"`，跨机部署时每台都要手改成
+该主机的内网 IP，容易漏改或填错。
+
+方案：`listen_addr` 支持 `auto`，并作为默认值：
+
+- Agent 启动时自动选择非回环 IPv4：优先取默认路由的源地址（UDP dial 只做
+  路由选择，不发包）；该地址不是 RFC1918 时，优先找物理网卡上的私有地址，
+  跳过 `docker0`/veth/`br-`/`virbr`/tun 等虚拟网卡；
+- 仍然是具体 IP 绑定，不监听 `0.0.0.0`/`::`，`allowed_ips` 校验不变；
+- 选中的地址在启动时写一行 journal：`listen_addr: auto -> 10.x.x.x`；
+- 安装脚本的 `--listen-addr` 不传时写 `auto`，健康探测按同样的路由规则取
+  实际地址；显式传 IP 时行为不变；
+- `configs/agent.yaml`、安装包内配置、文档同步更新。
+
+验证：
+
+| # | 场景 | 结果 |
+|---|---|---|
+| 1 | `gofmt` / `go build` / `go vet` / `go test ./...`（agent） | 通过 |
+| 2 | `configs/agent.yaml`（`listen_addr: auto`）经 `config.Load` | 解析出具体非回环地址并通过校验 |
+| 3 | 自动探测函数实测 | 返回本机主用内网地址（192.168.x.x） |
+| 4 | `bash -n` 安装脚本；`bin/agent-install.sh` 同步 | 通过 |
+| 5 | 重新构建 agent/backend/server/frontend 包 | `sha256sum -c` 全部 OK；安装包内 `agent.yaml` 为 `auto` |
+
+注意：旧版 Agent 二进制不认识 `auto`，升级时必须同时替换二进制与配置。

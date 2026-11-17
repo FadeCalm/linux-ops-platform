@@ -4,8 +4,27 @@ import { API_BASE } from './base'
 export default {
   auth: {
     status: () => http.get('/auth/status'),
-    login: (password) => http.post('/auth/login', { password }),
-    logout: () => http.post('/auth/logout')
+    login: (username, password) => http.post('/auth/login', { username, password }),
+    logout: () => http.post('/auth/logout'),
+    changePassword: (oldPassword, newPassword) =>
+      http.post('/auth/password', { old_password: oldPassword, new_password: newPassword }),
+    // Exchange credentials for a short-lived JWT (for scripts; the SPA itself
+    // keeps using the HttpOnly session cookie).
+    issueToken: (username, password) => http.post('/auth/token', { username, password })
+  },
+
+  tokens: {
+    list: (userId) => http.get('/auth/tokens', { params: userId ? { user_id: userId } : {} }),
+    create: (name, expiresInDays) =>
+      http.post('/auth/tokens', { name, expires_in_days: expiresInDays }),
+    remove: (id) => http.delete(`/auth/tokens/${id}`)
+  },
+
+  users: {
+    list: () => http.get('/users'),
+    create: (username, password) => http.post('/users', { username, password }),
+    resetPassword: (id, password) => http.put(`/users/${id}/password`, { password }),
+    remove: (id) => http.delete(`/users/${id}`)
   },
 
   health: () => http.get('/health'),

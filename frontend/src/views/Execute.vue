@@ -5,11 +5,11 @@
       <div class="exec-grid">
         <div>
           <div class="toolbar" style="margin-bottom: 10px">
-            <el-input v-model="filter.q" placeholder="筛选服务器" clearable size="small" style="width: 180px" />
+            <el-input v-model="filter.q" placeholder="Choose" clearable size="small" style="width: 180px" />
             <el-select v-model="filter.group_id" placeholder="全部分组" clearable size="small" style="width: 140px">
               <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
             </el-select>
-            <span class="muted">已选 {{ selectedIds.length }} 台 · 点击主机名进入单机页面</span>
+            <span class="muted">已选 {{ selectedIds.length }} 台 · Click info Can inter</span>
           </div>
           <el-table
             v-loading="loadingServers"

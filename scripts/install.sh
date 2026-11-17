@@ -15,10 +15,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INSTALL_DIR="${INSTALL_DIR:-/opt/linux-ops-platform}"
-CONF_DIR="${CONF_DIR:-/etc/linux-ops}"
-DATA_DIR="${DATA_DIR:-/var/lib/linux-ops}"
-SERVICE_USER="${SERVICE_USER:-linuxops}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/wxgzt-ops}"
+CONF_DIR="${CONF_DIR:-/etc/wxgzt-ops}"
+DATA_DIR="${DATA_DIR:-/var/lib/wxgzt-ops}"
 LAN_IP=""
 SKIP_COMPOSE=0
 
@@ -60,23 +59,22 @@ log "building backend, agent and frontend"
 bash "$ROOT/scripts/build.sh"
 
 # ---------------------------------------------------------------------------
-# system user & directories
+# directories (both services run as root; no dedicated system user is created)
 # ---------------------------------------------------------------------------
-if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
-  log "creating system user $SERVICE_USER"
-  useradd --system --home "$INSTALL_DIR" --shell /sbin/nologin "$SERVICE_USER"
-fi
-
 log "installing files under $INSTALL_DIR"
 install -d -m 0755 "$INSTALL_DIR"/{bin,frontend,docs}
-install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIR/logs"
+install -d -m 0750 "$DATA_DIR/logs"
 install -d -m 0755 "$CONF_DIR"
 
 install -m 0755 "$ROOT/bin/backend" "$INSTALL_DIR/bin/backend"
-install -m 0755 "$ROOT/bin/agent" "$INSTALL_DIR/bin/agent"
+install -m 0755 "$ROOT/bin/wxgzt-ops" "$INSTALL_DIR/bin/wxgzt-ops"
 if [[ -f "$ROOT/frontend/dist/index.html" ]]; then
   rm -rf "$INSTALL_DIR/frontend"/*
   cp -r "$ROOT/frontend/dist/." "$INSTALL_DIR/frontend/"
+elif [[ -d "$ROOT/frontend/dist" ]]; then
+  # VITE_BASE_PATH builds land in dist/<prefix>/ and expect nginx; the backend
+  # only serves a root-path build. See docs/production-deploy.md.
+  echo "!! prefixed frontend build detected; deploy it with nginx (docs/production-deploy.md)"
 fi
 cp -r "$ROOT/docs/." "$INSTALL_DIR/docs/" 2>/dev/null || true
 cp -r "$ROOT/scripts" "$INSTALL_DIR/scripts" 2>/dev/null || true
@@ -87,7 +85,9 @@ chmod +x "$INSTALL_DIR"/scripts/*.sh "$INSTALL_DIR"/tests/*.sh 2>/dev/null || tr
 # configs (secrets via EnvironmentFile, never in the YAML)
 # ---------------------------------------------------------------------------
 install -m 0644 "$ROOT/configs/backend.yaml" "$CONF_DIR/backend.yaml"
-install -m 0644 "$ROOT/configs/agent.yaml" "$CONF_DIR/agent.yaml"
+# The agent unit reads its config from the install directory so the packaged
+# agent.yaml works unchanged.
+install -m 0644 "$ROOT/configs/agent.yaml" "$INSTALL_DIR/agent.yaml"
 
 DB_PASSWORD_VALUE=""
 if [[ -f "$ROOT/deploy/.env" ]]; then
@@ -116,9 +116,9 @@ if [[ -z "$ACCESS_PASSWORD_VALUE" ]]; then
   ACCESS_PASSWORD_GENERATED=1
 fi
 
-BIND_ADDR="127.0.0.1:8080"
+BIND_ADDR="127.0.0.1:8089"
 if [[ -n "$LAN_IP" ]]; then
-  BIND_ADDR="${LAN_IP}:8080"
+  BIND_ADDR="${LAN_IP}:8089"
 fi
 
 log "writing $CONF_DIR/backend.env (mode 600)"
@@ -141,15 +141,15 @@ chmod 600 "$CONF_DIR/agent.env"
 # systemd
 # ---------------------------------------------------------------------------
 log "installing systemd units"
-install -m 0644 "$ROOT/deploy/systemd/linux-ops-backend.service" /etc/systemd/system/
-install -m 0644 "$ROOT/deploy/systemd/linux-ops-agent.service" /etc/systemd/system/
+install -m 0644 "$ROOT/deploy/systemd/wxgzt-ops-backend.service" /etc/systemd/system/
+install -m 0644 "$ROOT/deploy/systemd/wxgzt-ops.service" /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now linux-ops-agent linux-ops-backend
+systemctl enable --now wxgzt-ops wxgzt-ops-backend
 
 log "waiting for backend health"
 ok=0
 for _ in $(seq 1 30); do
-  if curl -fsS "http://127.0.0.1:8080/api/v1/health" >/dev/null 2>&1; then ok=1; break; fi
+  if curl -fsS "http://127.0.0.1:8089/api/v1/health" >/dev/null 2>&1; then ok=1; break; fi
   sleep 1
 done
 
@@ -157,16 +157,16 @@ echo
 if [[ "$ok" == "1" ]]; then
   echo "backend is healthy. Access the UI at:"
   if [[ -n "$LAN_IP" ]]; then
-    echo "  http://${LAN_IP}:8080/"
-    echo "  (restrict port 8080 to your admin subnet in the firewall now)"
+    echo "  http://${LAN_IP}:8089/"
+    echo "  (restrict port 8089 to your admin subnet in the firewall now)"
   else
-    echo "  http://127.0.0.1:8080/  (local only)"
+    echo "  http://127.0.0.1:8089/  (local only)"
     echo "  To access from another machine, set LISTEN_ADDR in $CONF_DIR/backend.env"
     echo "  to this server's PRIVATE IP, restart the service, and restrict the port."
   fi
 else
   echo "backend did not become healthy in time. Check:"
-  echo "  journalctl -u linux-ops-backend -n 100 --no-pager"
+  echo "  journalctl -u wxgzt-ops-backend -n 100 --no-pager"
 fi
 echo
 if [[ "$ACCESS_PASSWORD_GENERATED" == "1" ]]; then
@@ -177,7 +177,7 @@ else
   echo "Access password: from deploy/.env (written to $CONF_DIR/backend.env)."
 fi
 echo
-echo "Agent listens on 127.0.0.1:19090 (config: $CONF_DIR/agent.yaml)."
+echo "Agent listens on 127.0.0.1:19090 (config: $INSTALL_DIR/agent.yaml)."
 echo "Smoke test:  $INSTALL_DIR/tests/smoke.sh"
 echo
 echo "REMINDER: the access password is a single shared gate, not real authentication."

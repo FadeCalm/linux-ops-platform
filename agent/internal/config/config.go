@@ -1,12 +1,17 @@
-// Package config loads agent configuration. The agent binds to 127.0.0.1 by
-// default to avoid accidental exposure; cross-host deployments must opt into a
-// LAN address plus network ACLs.
+// Package config loads agent configuration. listen_addr: "auto" (the default)
+// binds this host's primary non-loopback IPv4 so the same agent.yaml works on
+// every host; an explicit address still wins. Cross-host deployments also need
+// an explicit source-IP allowlist (allowed_ips). Binding to 0.0.0.0 or using a
+// wildcard allowlist is rejected.
 package config
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -34,8 +39,18 @@ type TerminalConfig struct {
 }
 
 type Config struct {
-	ListenAddr       string         `yaml:"listen_addr"`
-	ListenPort       int            `yaml:"listen_port"`
+	// ListenAddr is a concrete IP, "auto", or empty (both mean auto). Auto is
+	// resolved by Load; after that it always holds a concrete address.
+	ListenAddr string `yaml:"listen_addr"`
+	// ListenAuto records that ListenAddr was auto-detected, so main can log the
+	// chosen address once at startup. Not part of the YAML schema.
+	ListenAuto bool `yaml:"-"`
+	ListenPort int  `yaml:"listen_port"`
+	// AllowedIPs is the source-address allowlist for every HTTP/WebSocket
+	// request. Entries are plain IPs (10.0.0.5) or CIDRs (10.0.0.0/24).
+	// Empty or wildcard entries are rejected by Validate; the agent fails
+	// closed rather than accepting every client.
+	AllowedIPs       []string       `yaml:"allowed_ips"`
 	WorkDir          string         `yaml:"work_dir"`
 	LogDir           string         `yaml:"log_dir"`
 	MaxConcurrent    int            `yaml:"max_concurrent"`
@@ -48,7 +63,7 @@ type Config struct {
 	// UpdateBaseURL points at the artifact prefix that serves the agent
 	// tarballs (and optionally manifest.json / SHA256SUMS). Empty disables
 	// self-update. The bucket is scanned with ListObjectsV2, so builds are
-	// discovered by filename: linux-ops-agent-<version>-linux-<arch>.tar.gz.
+	// discovered by filename: wxgzt-ops-agent-<version>-linux-<arch>.tar.gz.
 	UpdateBaseURL string `yaml:"update_base_url"`
 	// UpdateRequireChecksum refuses to install a release whose sha256 is not
 	// published in manifest.json or SHA256SUMS. Off by default so that
@@ -58,8 +73,9 @@ type Config struct {
 
 func Default() *Config {
 	return &Config{
-		ListenAddr:       "127.0.0.1",
+		ListenAddr:       "auto",
 		ListenPort:       19090,
+		AllowedIPs:       []string{"127.0.0.1"},
 		WorkDir:          "/tmp",
 		LogDir:           "./data/agent-logs",
 		MaxConcurrent:    8,
@@ -79,7 +95,7 @@ func Default() *Config {
 			// normal login shell instead.
 			HistoryMode: "memory",
 		},
-		UpdateBaseURL: "http://47.114.120.205:9000/linux-ops-agent",
+		UpdateBaseURL: "http://127.0.0.1:9000/wxgzt-ops",
 	}
 }
 
@@ -103,11 +119,17 @@ func Load(path string) (*Config, error) {
 			cfg.ListenPort = p
 		}
 	}
+	if v := os.Getenv("AGENT_ALLOWED_IPS"); v != "" {
+		cfg.AllowedIPs = splitList(v)
+	}
 	if v := os.Getenv("AGENT_LOG_DIR"); v != "" {
 		cfg.LogDir = v
 	}
 	if v, ok := os.LookupEnv("AGENT_UPDATE_BASE_URL"); ok {
 		cfg.UpdateBaseURL = v
+	}
+	if err := cfg.resolveListenAddr(); err != nil {
+		return nil, err
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -115,13 +137,199 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// resolveListenAddr turns "auto" (or an empty value) into a concrete local IP.
+// Auto-detection keeps the agent off 0.0.0.0 while allowing one agent.yaml to
+// be deployed unchanged on every host.
+func (c *Config) resolveListenAddr() error {
+	s := strings.TrimSpace(c.ListenAddr)
+	if s != "" && !strings.EqualFold(s, "auto") {
+		return nil
+	}
+	ip, err := detectListenAddr()
+	if err != nil {
+		return err
+	}
+	c.ListenAddr = ip
+	c.ListenAuto = true
+	return nil
+}
+
+// detectListenAddr picks a non-loopback IPv4 for listen_addr: auto. It prefers
+// the source address the kernel would use for outbound traffic when that is a
+// private (RFC1918) address, then any private address on a physical interface.
+// Hosts with several management networks should still set listen_addr
+// explicitly.
+func detectListenAddr() (string, error) {
+	routeIP := routeSourceIPv4()
+	if routeIP != nil && routeIP.IsPrivate() {
+		return routeIP.String(), nil
+	}
+	if ip := firstInterfaceIPv4(true); ip != nil {
+		return ip.String(), nil
+	}
+	if routeIP != nil {
+		return routeIP.String(), nil
+	}
+	if ip := firstInterfaceIPv4(false); ip != nil {
+		return ip.String(), nil
+	}
+	return "", fmt.Errorf("listen_addr: auto found no non-loopback IPv4 address; set listen_addr explicitly")
+}
+
+// routeSourceIPv4 asks the kernel which source address it would use for an
+// outbound flow. A UDP "dial" selects the route but sends no packets, and
+// TEST-NET-2 is never routed.
+func routeSourceIPv4() net.IP {
+	conn, err := net.Dial("udp4", "198.51.100.1:9")
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	ua, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return nil
+	}
+	ip := ua.IP.To4()
+	if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return nil
+	}
+	return ip
+}
+
+// isVirtualIface skips container/bridge/tunnel interfaces so auto-detection
+// does not bind docker0 or a veth address.
+func isVirtualIface(name string) bool {
+	lower := strings.ToLower(name)
+	for _, prefix := range []string{
+		"lo", "docker", "veth", "br-", "virbr", "tun", "tap",
+		"cni", "flannel", "kube", "podman", "cali",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// firstInterfaceIPv4 returns the first usable IPv4 on a physical interface.
+// privateOnly restricts it to RFC1918 addresses.
+func firstInterfaceIPv4(privateOnly bool) net.IP {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var public net.IP
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		if isVirtualIface(iface.Name) {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			ip4 := ip.To4()
+			if ip4 == nil || ip4.IsLoopback() || ip4.IsLinkLocalUnicast() {
+				continue
+			}
+			if ip4.IsPrivate() {
+				return ip4
+			}
+			if public == nil {
+				public = ip4
+			}
+		}
+	}
+	if privateOnly {
+		return nil
+	}
+	return public
+}
+
+func splitList(raw string) []string {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n'
+	})
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// isWildcard reports addresses that would allow every client. These must never
+// appear in allowed_ips or as the bind address.
+func isWildcard(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "*", "0.0.0.0", "::", "0.0.0.0/0", "::/0":
+		return true
+	}
+	return false
+}
+
+// normalizeAllowedIP validates one allowlist entry and returns a canonical
+// form. Bare addresses become /32 (IPv4) or /128 (IPv6).
+func normalizeAllowedIP(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if isWildcard(s) {
+		return "", fmt.Errorf("allowed_ips entry %q would allow every client; list explicit backend IPs/CIDRs", raw)
+	}
+	if strings.Contains(s, "/") {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return "", fmt.Errorf("allowed_ips entry %q is not a valid CIDR", raw)
+		}
+		p = p.Masked()
+		if p.Bits() == 0 {
+			return "", fmt.Errorf("allowed_ips entry %q would allow every client", raw)
+		}
+		return p.String(), nil
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return "", fmt.Errorf("allowed_ips entry %q is not a valid IP address", raw)
+	}
+	a = a.Unmap()
+	return a.String(), nil
+}
+
 func (c *Config) Validate() error {
 	if c.ListenAddr == "" {
 		return fmt.Errorf("listen_addr is required")
 	}
+	if isWildcard(c.ListenAddr) {
+		return fmt.Errorf("listen_addr must be a concrete interface address, not %q; bind to the host's management IP (or 127.0.0.1)", c.ListenAddr)
+	}
+	if _, err := netip.ParseAddr(strings.TrimSpace(c.ListenAddr)); err != nil {
+		return fmt.Errorf("listen_addr %q is not a valid IP address", c.ListenAddr)
+	}
 	if c.ListenPort < 1 || c.ListenPort > 65535 {
 		return fmt.Errorf("invalid listen_port")
 	}
+	if len(c.AllowedIPs) == 0 {
+		return fmt.Errorf("allowed_ips is required: list the backend host IP(s) permitted to reach the agent")
+	}
+	normalized := make([]string, 0, len(c.AllowedIPs))
+	for _, raw := range c.AllowedIPs {
+		v, err := normalizeAllowedIP(raw)
+		if err != nil {
+			return err
+		}
+		normalized = append(normalized, v)
+	}
+	c.AllowedIPs = normalized
 	if c.MaxConcurrent <= 0 {
 		c.MaxConcurrent = 8
 	}

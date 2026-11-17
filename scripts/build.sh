@@ -25,7 +25,7 @@ AGENT_VERSION="${AGENT_VERSION:-0.0.0}"
 echo "==> building agent ($AGENT_VERSION)"
 (cd "$ROOT/agent" && CGO_ENABLED=0 go build \
   -ldflags "-X main.version=${AGENT_VERSION}" \
-  -o "$ROOT/bin/agent" .)
+  -o "$ROOT/bin/wxgzt-ops" .)
 
 if [[ "$SKIP_FRONTEND" == "0" ]]; then
   if command -v npm >/dev/null 2>&1; then

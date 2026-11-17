@@ -22,12 +22,11 @@ func (h *Handlers) targetServer(c *gin.Context) (models.Server, string, bool) {
 	if !okID {
 		return models.Server{}, "", false
 	}
-	var srv models.Server
-	if err := h.db.First(&srv, id).Error; err != nil {
-		fail(c, http.StatusNotFound, "server not found")
+	srv, allowed := h.loadServerForUser(c, id)
+	if !allowed {
 		return models.Server{}, "", false
 	}
-	return srv, fmt.Sprintf("%s:%d", srv.IP, srv.AgentPort), true
+	return *srv, fmt.Sprintf("%s:%d", srv.IP, srv.AgentPort), true
 }
 
 // agentError forwards an agent error status/message to the browser.
@@ -119,7 +118,7 @@ func (h *Handlers) FSWrite(c *gin.Context) {
 		agentError(c, err)
 		return
 	}
-	h.audit("fs.write", "server", strconv.FormatInt(srv.ID, 10), body.Path)
+	h.audit(c, "fs.write", "server", strconv.FormatInt(srv.ID, 10), body.Path)
 	ok(c, gin.H{"ok": true})
 }
 
@@ -155,7 +154,7 @@ func (h *Handlers) FSOp(c *gin.Context) {
 	if body.NewPath != "" {
 		detail += " -> " + body.NewPath
 	}
-	h.audit("fs."+strings.ToLower(body.Op), "server", strconv.FormatInt(srv.ID, 10), detail)
+	h.audit(c, "fs."+strings.ToLower(body.Op), "server", strconv.FormatInt(srv.ID, 10), detail)
 	ok(c, gin.H{"ok": true})
 }
 
@@ -185,7 +184,7 @@ func (h *Handlers) FSDownload(c *gin.Context) {
 	if _, err := io.Copy(c.Writer, resp.Body); err != nil {
 		return
 	}
-	h.audit("fs.download", "server", strconv.FormatInt(srv.ID, 10), path)
+	h.audit(c, "fs.download", "server", strconv.FormatInt(srv.ID, 10), path)
 }
 
 // FSUpload proxies one chunk of a chunked upload to the agent.
@@ -211,7 +210,7 @@ func (h *Handlers) FSUpload(c *gin.Context) {
 		return
 	}
 	if res.Done {
-		h.audit("fs.upload", "server", strconv.FormatInt(srv.ID, 10),
+		h.audit(c, "fs.upload", "server", strconv.FormatInt(srv.ID, 10),
 			fmt.Sprintf("%s (%d bytes)", res.Path, res.Total))
 	}
 	ok(c, res)

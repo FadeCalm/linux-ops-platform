@@ -1,6 +1,7 @@
 // Package api wires HTTP routes, handlers and middleware for the management
-// backend. Access can be gated by one shared password (see auth.go); that is a
-// convenience barrier, not real authentication, so the API must still only be
+// backend. Accounts, roles and per-owner server isolation are enforced here
+// (see auth.go, permissions.go), but this is still not a hardened auth system:
+// there is no TLS, MFA or Agent authentication, so the API must only be
 // reachable from a controlled, isolated network.
 package api
 
@@ -32,13 +33,14 @@ type Handlers struct {
 	// termSem bounds the number of interactive terminal WebSockets proxied by
 	// this backend.
 	termSem chan struct{}
-	// auth gates /api/v1 behind the shared access password; disabled when the
-	// password is empty.
+	// auth gates /api/v1 behind accounts and sessions.
 	auth         *authGate
 	loginLimiter *loginLimiter
+	// jwtSecret signs short-lived bearer tokens for API clients.
+	jwtSecret []byte
 }
 
-func NewHandlers(cfg *config.Config, db *gorm.DB, sched *scheduler.Scheduler, store *logstore.Store, hub *ws.Hub, agent *agentclient.Client) *Handlers {
+func NewHandlers(cfg *config.Config, db *gorm.DB, sched *scheduler.Scheduler, store *logstore.Store, hub *ws.Hub, agent *agentclient.Client, jwtSecret string) *Handlers {
 	maxTerm := cfg.WebSocket.MaxTerminalSessions
 	if maxTerm <= 0 {
 		maxTerm = 16
@@ -46,8 +48,9 @@ func NewHandlers(cfg *config.Config, db *gorm.DB, sched *scheduler.Scheduler, st
 	return &Handlers{
 		cfg: cfg, db: db, sched: sched, store: store, hub: hub, agent: agent,
 		termSem:      make(chan struct{}, maxTerm),
-		auth:         newAuthGate(cfg.Auth.AccessPassword, time.Duration(cfg.Auth.SessionHours)*time.Hour),
+		auth:         newAuthGate(time.Duration(cfg.Auth.SessionHours) * time.Hour),
 		loginLimiter: newLoginLimiter(10, time.Minute),
+		jwtSecret:    []byte(jwtSecret),
 	}
 }
 
@@ -60,13 +63,26 @@ func (h *Handlers) Register(r *gin.Engine) {
 	v1.GET("/health", h.Health)
 	v1.GET("/auth/status", h.AuthStatus)
 	v1.POST("/auth/login", h.AuthLogin)
+	v1.POST("/auth/token", h.AuthIssueToken)
 	v1.POST("/auth/logout", h.AuthLogout)
 
-	// Everything below requires a valid session cookie when a password is set.
+	// Everything below requires a valid session cookie or bearer credential
+	// (see requireAuth).
 	p := v1.Group("", h.requireAuth())
+
+	p.POST("/auth/password", h.AuthChangePassword)
+	p.GET("/auth/tokens", h.ListTokens)
+	p.POST("/auth/tokens", h.CreateToken)
+	p.DELETE("/auth/tokens/:id", h.DeleteToken)
 
 	p.GET("/config/limits", h.Limits)
 	p.GET("/stats/overview", h.Overview)
+
+	// Console accounts. Only the admin can create/reset/delete sub-users.
+	p.GET("/users", h.requireAdmin(), h.ListUsers)
+	p.POST("/users", h.requireAdmin(), h.CreateUser)
+	p.PUT("/users/:id/password", h.requireAdmin(), h.ResetUserPassword)
+	p.DELETE("/users/:id", h.requireAdmin(), h.DeleteUser)
 
 	p.GET("/servers", h.ListServers)
 	p.POST("/servers", h.CreateServer)
@@ -89,14 +105,15 @@ func (h *Handlers) Register(r *gin.Engine) {
 	p.PUT("/servers/:id/fs/upload", h.FSUpload)
 	p.POST("/servers/:id/fs/op", h.FSOp)
 
+	// Groups/tags are shared lookup values; only the admin may change them.
 	p.GET("/groups", h.ListGroups)
-	p.POST("/groups", h.CreateGroup)
-	p.PUT("/groups/:id", h.UpdateGroup)
-	p.DELETE("/groups/:id", h.DeleteGroup)
+	p.POST("/groups", h.requireAdmin(), h.CreateGroup)
+	p.PUT("/groups/:id", h.requireAdmin(), h.UpdateGroup)
+	p.DELETE("/groups/:id", h.requireAdmin(), h.DeleteGroup)
 
 	p.GET("/tags", h.ListTags)
-	p.POST("/tags", h.CreateTag)
-	p.DELETE("/tags/:id", h.DeleteTag)
+	p.POST("/tags", h.requireAdmin(), h.CreateTag)
+	p.DELETE("/tags/:id", h.requireAdmin(), h.DeleteTag)
 
 	p.POST("/tasks", h.CreateTask)
 	p.GET("/tasks", h.ListTasks)
@@ -188,10 +205,18 @@ func (h *Handlers) bodyLimit() gin.HandlerFunc {
 
 // ---- audit ----
 
-func (h *Handlers) audit(action, resource, resourceID, detail string) {
+func (h *Handlers) audit(c *gin.Context, action, resource, resourceID, detail string) {
+	operator := "anonymous"
+	if u := currentUser(c); u != nil {
+		operator = u.Username
+	}
+	h.auditAs(operator, action, resource, resourceID, detail)
+}
+
+func (h *Handlers) auditAs(operator, action, resource, resourceID, detail string) {
 	h.db.Create(&models.AuditEvent{
 		Action: action, Resource: resource, ResourceID: resourceID,
-		Operator: "anonymous", DetailJSON: detail, CreatedAt: time.Now().UTC(),
+		Operator: operator, DetailJSON: detail, CreatedAt: time.Now().UTC(),
 	})
 }
 
@@ -215,29 +240,46 @@ func (h *Handlers) Limits(c *gin.Context) {
 	})
 }
 
-// Overview powers the dashboard.
+// Overview powers the dashboard. The numbers are scoped to what the current
+// account can see (the admin sees everything, a sub-user sees only their own).
 func (h *Handlers) Overview(c *gin.Context) {
+	u := currentUser(c)
+	serverQ := func() *gorm.DB {
+		q := h.db.Model(&models.Server{})
+		if !h.isAdmin(u) {
+			q = q.Where("owner_id = ?", u.ID)
+		}
+		return q
+	}
+	taskQ := func() *gorm.DB {
+		q := h.db.Model(&models.ExecutionTask{})
+		if !h.isAdmin(u) {
+			q = q.Where("owner_id = ?", u.ID)
+		}
+		return q
+	}
+
 	var total, online, offline int64
-	h.db.Model(&models.Server{}).Count(&total)
-	h.db.Model(&models.Server{}).Where("status = ?", models.StatusOnline).Count(&online)
+	serverQ().Count(&total)
+	serverQ().Where("status = ?", models.StatusOnline).Count(&online)
 	// Treat "unknown" (never checked yet) as not online so the dashboard
 	// numbers add up: total = online + offline.
-	h.db.Model(&models.Server{}).Where("status <> ?", models.StatusOnline).Count(&offline)
+	serverQ().Where("status <> ?", models.StatusOnline).Count(&offline)
 
 	type versionCount struct {
 		AgentVersion string `json:"version"`
 		Count        int64  `json:"count"`
 	}
 	var versions []versionCount
-	h.db.Model(&models.Server{}).Select("agent_version as agent_version, count(*) as count").
+	serverQ().Select("agent_version as agent_version, count(*) as count").
 		Group("agent_version").Scan(&versions)
 
 	var recent []models.ExecutionTask
-	h.db.Order("created_at desc").Limit(10).Find(&recent)
+	taskQ().Order("created_at desc").Limit(10).Find(&recent)
 
 	var taskTotal, taskSuccess int64
-	h.db.Model(&models.ExecutionTask{}).Count(&taskTotal)
-	h.db.Model(&models.ExecutionTask{}).Where("status = ?", models.StatusSuccess).Count(&taskSuccess)
+	taskQ().Count(&taskTotal)
+	taskQ().Where("status = ?", models.StatusSuccess).Count(&taskSuccess)
 	rate := 0.0
 	if taskTotal > 0 {
 		rate = float64(taskSuccess) / float64(taskTotal) * 100

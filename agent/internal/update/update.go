@@ -41,13 +41,13 @@ const (
 	maxArchiveSize  = 256 << 20
 	maxBinarySize   = 64 << 20
 	// releasePrefix is the filename convention for published builds:
-	//   linux-ops-agent-<version>-linux-<arch>.tar.gz
+	//   wxgzt-ops-agent-<version>-linux-<arch>.tar.gz
 	// Uploading a file that matches it is all that is needed to publish.
-	releasePrefix = "linux-ops-agent-"
+	releasePrefix = "wxgzt-ops-agent-"
 )
 
 var releasePattern = regexp.MustCompile(
-	`^linux-ops-agent-(\d+\.\d+\.\d+)-linux-([a-z0-9_]+)\.tar\.gz$`)
+	`^wxgzt-ops-agent-(\d+\.\d+\.\d+)-linux-([a-z0-9_]+)\.tar\.gz$`)
 
 // Manifest describes the latest published agent build.
 type Manifest struct {
@@ -242,7 +242,7 @@ func (m *Manager) listReleases(ctx context.Context) ([]release, error) {
 		token = lr.NextContinuationToken
 	}
 	if len(out) == 0 {
-		return nil, errors.New("no linux-ops-agent-<version>-linux-" +
+		return nil, errors.New("no wxgzt-ops-agent-<version>-linux-" +
 			runtime.GOARCH + ".tar.gz found in the artifact bucket")
 	}
 	return out, nil
@@ -303,6 +303,10 @@ func (m *Manager) resolve(ctx context.Context) (*release, error) {
 	)
 	if got, err := m.fetchManifest(ctx); err != nil {
 		manErr = err
+	} else if match := releasePattern.FindStringSubmatch(path.Base(got.File)); match == nil || match[2] != runtime.GOARCH {
+		// A bucket shared by several architectures has one manifest.json; do
+		// not let an amd64 manifest pull an amd64 tarball onto an arm64 host.
+		manErr = fmt.Errorf("manifest describes %q, not linux/%s", got.File, runtime.GOARCH)
 	} else {
 		man = got
 		best = &release{
@@ -433,7 +437,7 @@ func (m *Manager) download(ctx context.Context, file string) (string, string, er
 		return "", "", fmt.Errorf("download package: http %d", resp.StatusCode)
 	}
 
-	tmp, err := os.CreateTemp("", "linux-ops-agent-update-*.tar.gz")
+	tmp, err := os.CreateTemp("", "wxgzt-ops-update-*.tar.gz")
 	if err != nil {
 		return "", "", err
 	}
@@ -475,7 +479,10 @@ func extractBinary(archive, dst string) error {
 		if err != nil {
 			return fmt.Errorf("read archive: %w", err)
 		}
-		if hdr.Typeflag != tar.TypeReg || path.Base(hdr.Name) != "agent" {
+		// Accept the current layout (wxgzt-ops/wxgzt-ops) and the legacy
+		// linux-ops-agent/agent layout so older published tarballs still work.
+		base := path.Base(hdr.Name)
+		if hdr.Typeflag != tar.TypeReg || (base != "wxgzt-ops" && base != "agent") {
 			continue
 		}
 		out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)

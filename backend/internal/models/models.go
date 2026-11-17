@@ -21,6 +21,68 @@ const (
 	StatusUnknownAgent = "unknown"
 )
 
+// User roles. admin can see and manage every server and sub-user; user can
+// only see and operate the servers they created.
+const (
+	RoleAdmin = "admin"
+	RoleUser  = "user"
+)
+
+// User is a console account. Passwords are stored as bcrypt hashes only.
+type User struct {
+	ID           int64     `gorm:"primaryKey" json:"id"`
+	Username     string    `gorm:"size:64;not null;uniqueIndex" json:"username"`
+	PasswordHash string    `gorm:"size:255;not null" json:"-"`
+	Role         string    `gorm:"size:16;not null;default:'user';index" json:"role"`
+	CreatedBy    string    `gorm:"size:64" json:"created_by"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+
+	ServerCount int64 `gorm:"->" json:"server_count"`
+}
+
+// UserSession is a server-side login session. Only the SHA-256 of the cookie
+// token is stored, so a database leak does not hand out working cookies.
+type UserSession struct {
+	ID        int64     `gorm:"primaryKey" json:"id"`
+	TokenHash string    `gorm:"size:64;not null;uniqueIndex" json:"-"`
+	UserID    int64     `gorm:"not null;index" json:"user_id"`
+	ExpiresAt time.Time `gorm:"index" json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// APIToken is a long-lived bearer credential for scripts and integrations.
+// Only the SHA-256 of the token is stored; the plaintext is shown once when it
+// is created. Tokens inherit the owning user's permissions and are revoked
+// when an admin resets the password or deletes the account.
+type APIToken struct {
+	ID       int64  `gorm:"primaryKey" json:"id"`
+	UserID   int64  `gorm:"not null;index" json:"user_id"`
+	Username string `gorm:"size:64" json:"username"` // denormalized for admin listings
+	Name     string `gorm:"size:64;not null" json:"name"`
+	// TokenHash is the lookup key; the plaintext itself is never stored.
+	TokenHash string `gorm:"size:64;not null;uniqueIndex" json:"-"`
+	// Prefix is the displayable head of the token (e.g. "lop_ab12cd34").
+	Prefix     string     `gorm:"size:16;not null" json:"prefix"`
+	ExpiresAt  *time.Time `gorm:"index" json:"expires_at"` // nil = never expires
+	LastUsedAt *time.Time `json:"last_used_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+// Setting stores small server-side values that must survive restarts. The
+// only entry today is the auto-generated JWT signing secret; values are never
+// returned by the API.
+type Setting struct {
+	Name      string    `gorm:"primaryKey;size:64" json:"name"`
+	Value     string    `gorm:"type:text" json:"-"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// TableName pins the name used by database/schema.sql. GORM's default would
+// be "settings"; keeping it explicit avoids surprises between AutoMigrate and
+// the manual DDL.
+func (Setting) TableName() string { return "app_settings" }
+
 // ServerGroup groups managed hosts.
 type ServerGroup struct {
 	ID          int64     `gorm:"primaryKey" json:"id"`
@@ -50,6 +112,8 @@ type Server struct {
 	GroupID       *int64     `gorm:"index" json:"group_id"`
 	Status        string     `gorm:"size:32;not null;default:'unknown';index" json:"status"`
 	AgentVersion  string     `gorm:"size:64" json:"agent_version"`
+	OwnerID       int64      `gorm:"not null;default:0;index" json:"owner_id"`
+	OwnerName     string     `gorm:"size:64" json:"owner_name"`
 	LastHeartbeat *time.Time `gorm:"column:last_heartbeat_at" json:"last_heartbeat_at"`
 	CreatedAt     time.Time  `json:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at"`
@@ -82,6 +146,8 @@ type ExecutionTask struct {
 	Cancelled      int        `json:"cancelled"`
 	IdempotencyKey *string    `gorm:"size:128;uniqueIndex" json:"idempotency_key,omitempty"`
 	CreatedBy      string     `gorm:"size:64;not null;default:'anonymous'" json:"created_by"`
+	OwnerID        int64      `gorm:"not null;default:0;index" json:"owner_id"`
+	OwnerName      string     `gorm:"size:64" json:"owner_name"`
 	CreatedAt      time.Time  `gorm:"index" json:"created_at"`
 	FinishedAt     *time.Time `json:"finished_at"`
 }
@@ -118,8 +184,12 @@ type ExecutionLogIndex struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// AuditEvent records operations. In phase 1 there is no user auth, so the
-// operator is always "anonymous"; it must never be forged.
+// TableName matches database/schema.sql. GORM's default pluralization would
+// produce "execution_log_indices".
+func (ExecutionLogIndex) TableName() string { return "execution_log_indexes" }
+
+// AuditEvent records operations. Operator is the authenticated username, or
+// "anonymous" for unauthenticated actions; it must never be forged.
 type AuditEvent struct {
 	ID         int64     `gorm:"primaryKey" json:"id"`
 	Action     string    `gorm:"size:64;not null;index" json:"action"`
@@ -133,6 +203,10 @@ type AuditEvent struct {
 // AllModels is the list passed to GORM AutoMigrate.
 func AllModels() []interface{} {
 	return []interface{}{
+		&User{},
+		&UserSession{},
+		&APIToken{},
+		&Setting{},
 		&ServerGroup{},
 		&ServerTag{},
 		&Server{},

@@ -5,17 +5,27 @@
         <div class="login-mark">L</div>
         <div>
           <div class="login-title">集中运维平台</div>
-          <div class="login-sub">输入访问密码后进入控制台</div>
+          <div class="login-sub">使用账号登录控制台</div>
         </div>
       </div>
+
+      <el-input
+        ref="username"
+        v-model="username"
+        placeholder="用户名"
+        class="login-input"
+        autocomplete="username"
+        @keyup.enter.native="focusPassword"
+      />
 
       <el-input
         ref="password"
         v-model="password"
         type="password"
         show-password
-        placeholder="访问密码"
+        placeholder="密码"
         class="login-input"
+        autocomplete="current-password"
         @keyup.enter.native="submit"
       />
 
@@ -34,7 +44,7 @@
       </div>
 
       <div class="login-note">
-        本平台运行在隔离内网，密码为统一访问口令，不区分用户。
+        账号由管理员创建；子用户只能看到自己名下的服务器。仅限受控内网访问。
       </div>
     </div>
   </div>
@@ -47,6 +57,7 @@ export default {
   name: 'Login',
   data() {
     return {
+      username: '',
       password: '',
       loading: false,
       error: ''
@@ -54,20 +65,25 @@ export default {
   },
   mounted() {
     this.$nextTick(() => {
-      const el = this.$refs.password && this.$refs.password.$el.querySelector('input')
+      const el = this.$refs.username && this.$refs.username.$el.querySelector('input')
       if (el) el.focus()
     })
   },
   methods: {
+    focusPassword() {
+      const el = this.$refs.password && this.$refs.password.$el.querySelector('input')
+      if (el) el.focus()
+    },
     async submit() {
-      if (!this.password) {
-        this.error = '请输入访问密码'
+      if (!this.username || !this.password) {
+        this.error = '请输入用户名和密码'
         return
       }
       this.loading = true
       this.error = ''
       try {
-        await api.auth.login(this.password)
+        const res = await api.auth.login(this.username.trim(), this.password)
+        this.$store.commit('setUser', (res && res.user) || null)
         const redirect = this.$route.query.redirect || '/dashboard'
         this.password = ''
         this.$router.replace(redirect)
