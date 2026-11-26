@@ -2,27 +2,19 @@
   <div v-if="!isPublicRoute" class="app-shell">
     <header class="topbar">
       <div class="brand">
-        <div class="brand-mark">L</div>
+        <div class="brand-mark">W</div>
         <div class="brand-text">
           <span class="brand-title">集中运维</span>
-          <span class="brand-sub">wxgzt</span>
+          <span class="brand-sub">wxgzt · 内网控制台</span>
         </div>
       </div>
-      <nav class="top-nav">
-        <router-link
-          v-for="item in nav"
-          :key="item.path"
-          :to="item.path"
-          class="top-nav-item"
-          active-class="active"
-        >
-          <i :class="item.icon"></i><span>{{ item.title }}</span>
-        </router-link>
-      </nav>
+      <span class="top-sep"></span>
+      <span class="top-signal">
+        <span class="led" :class="backendOnline ? 'led-ok' : 'led-err'"></span>
+        {{ backendOnline ? '后端在线' : '后端离线' }}
+      </span>
       <div class="top-status">
-        <span class="status-dot" :class="{ online: backendOnline }"></span>
-        <span>{{ backendOnline ? '后端在线' : '后端离线' }}</span>
-        <el-tooltip :content="theme === 'dark' ? '切换到浅色（白）配色' : '切换到深色（黑）配色'" placement="bottom">
+        <el-tooltip :content="theme === 'dark' ? '切换到浅色（铝）配色' : '切换到深色（石墨）配色'" placement="bottom">
           <button class="theme-toggle" type="button" @click="toggleTheme">
             <i :class="theme === 'dark' ? 'el-icon-sunny' : 'el-icon-moon'"></i>
             <span>{{ theme === 'dark' ? '浅色' : '深色' }}</span>
@@ -65,14 +57,6 @@
         >
           <i :class="item.icon"></i><span>{{ item.title }}</span>
         </router-link>
-
-        <div class="side-section" style="margin-top: 24px">环境提示</div>
-        <div class="side-note">
-          <div class="side-note-title"><i class="el-icon-warning-outline"></i> 隔离网络</div>
-          <div class="side-note-text">
-            子用户只能看到自己名下的服务器；管理员可见全部。仅限受控内网，禁止暴露公网。
-          </div>
-        </div>
       </aside>
 
       <main class="content">
@@ -218,7 +202,7 @@ export default {
         { path: '/servers', title: 'Resource', icon: 'el-icon-monitor' },
         { path: '/execute', title: 'Command', icon: 'el-icon-cpu' },
         { path: '/files', title: 'File', icon: 'el-icon-folder-opened' },
-        { path: '/terminal', title: 'Batch', icon: 'el-icon-connection' },
+        { path: '/terminal', title: 'Terminal', icon: 'el-icon-connection' },
         { path: '/history', title: 'History', icon: 'el-icon-document' }
       ]
       if (this.isAdmin) {
@@ -228,11 +212,11 @@ export default {
     },
     subtitle() {
       const map = {
-        dashboard: '服务器在线状态',
-        servers: '健康状态',
-        execute: 'r',
-        files: '',
-        history: '',
+        dashboard: '受管主机的在线状态与近期任务',
+        servers: '主机列表、健康状态与 Agent 版本',
+        execute: '向多台主机下发命令并查看实时输出',
+        files: '浏览、上传和编辑受管主机上的文件',
+        history: '任务记录与资源操作审计',
         'server-execute': '',
         terminal: '',
         'terminal-pick': '选择一台受管主机，打开真实的交互式 Shell 会话',
@@ -398,16 +382,19 @@ export default {
 }
 .top-user em {
   font-style: normal;
-  padding: 1px 6px;
+  padding: 0 5px;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text-strong);
+  border-radius: var(--radius-sm);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  color: var(--muted);
 }
 .token-box {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 10px 12px;
   margin-bottom: 12px;
+  background: var(--panel-2);
 }
 .token-label {
   font-size: 12px;
@@ -423,9 +410,11 @@ export default {
   flex: 1;
   word-break: break-all;
   padding: 6px 8px;
-  border-radius: 6px;
-  background: rgba(127, 127, 127, 0.12);
-  font-size: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
 }
 .token-create {
   display: flex;

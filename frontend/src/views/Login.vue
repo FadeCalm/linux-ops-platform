@@ -2,10 +2,9 @@
   <div class="login-page">
     <div class="login-card">
       <div class="login-brand">
-        <div class="login-mark">L</div>
+        <div class="login-mark">W</div>
         <div>
           <div class="login-title">集中运维平台</div>
-          <div class="login-sub">使用账号登录控制台</div>
         </div>
       </div>
 
@@ -108,30 +107,43 @@ export default {
 }
 
 .login-card {
+  position: relative;
   width: 100%;
-  max-width: 380px;
-  padding: 32px 30px 24px;
+  max-width: 360px;
+  padding: 30px 28px 22px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 14px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  border-radius: var(--radius);
+  box-shadow: var(--panel-highlight);
+  overflow: hidden;
+}
+
+/* 与顶部控制条同一段铜色导轨，登录页是它的延申 */
+.login-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0;
+  width: 76px; height: 2px;
+  background: var(--accent);
 }
 
 .login-brand {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 26px;
+  margin-bottom: 24px;
 }
 
 .login-mark {
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
-  background: var(--accent);
-  color: var(--on-accent);
-  font-weight: 800;
-  font-size: 20px;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -139,14 +151,16 @@ export default {
 }
 
 .login-title {
-  font-size: 16px;
+  font-size: 15.5px;
   font-weight: 600;
   color: var(--text-strong);
 }
 
 .login-sub {
   margin-top: 3px;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
   color: var(--muted);
 }
 
@@ -156,7 +170,8 @@ export default {
 
 .login-btn {
   width: 100%;
-  height: 38px;
+  height: 36px;
+  letter-spacing: 0.02em;
 }
 
 .login-error {
@@ -169,11 +184,11 @@ export default {
 }
 
 .login-note {
-  margin-top: 22px;
-  padding-top: 14px;
+  margin-top: 20px;
+  padding-top: 12px;
   border-top: 1px solid var(--border-soft);
-  color: var(--placeholder);
-  font-size: 12px;
+  color: var(--muted);
+  font-size: 11.5px;
   line-height: 1.6;
 }
 </style>

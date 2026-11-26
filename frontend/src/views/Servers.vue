@@ -59,6 +59,16 @@
         <el-table-column prop="name" label="名称" min-width="140">
           <template slot-scope="{ row }"><strong>{{ row.name }}</strong></template>
         </el-table-column>
+        <!-- 状态和版本紧跟名称：表格横向滚动时，最需要扫读的两列不会被
+             「操作」固定列挡住。 -->
+        <el-table-column label="状态" width="100">
+          <template slot-scope="{ row }">
+            <span class="status-badge" :class="statusClass(row.status)">{{ statusText(row.status) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="Agent 版本" width="120">
+          <template slot-scope="{ row }"><span class="mono">{{ row.agent_version || '-' }}</span></template>
+        </el-table-column>
         <el-table-column label="归属账号" width="160">
           <template slot-scope="{ row }">
             <el-tag
@@ -89,14 +99,6 @@
             <el-tag v-for="t in row.tags" :key="t.id" size="mini" style="margin-right: 4px">{{ t.name }}</el-tag>
             <span v-if="!row.tags || !row.tags.length" class="muted">-</span>
           </template>
-        </el-table-column>
-        <el-table-column label="状态" width="100">
-          <template slot-scope="{ row }">
-            <span class="status-badge" :class="statusClass(row.status)">{{ statusText(row.status) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="Agent 版本" width="120">
-          <template slot-scope="{ row }"><span class="mono">{{ row.agent_version || '-' }}</span></template>
         </el-table-column>
         <el-table-column label="最后心跳" width="170">
           <template slot-scope="{ row }">{{ formatTime(row.last_heartbeat_at) }}</template>
@@ -733,13 +735,14 @@ export default {
 }
 /* Highlight the row action when a newer agent build is known to exist. */
 .upgrade-hot {
-  color: #b45309 !important;
-  background: #fef3c7;
-  border-radius: 10px;
-  padding: 0 8px;
+  color: var(--accent) !important;
+  background: var(--accent-soft);
+  border-radius: var(--radius-sm);
+  padding: 0 7px;
   font-weight: 600;
 }
 .upgrade-hot:hover {
-  background: #fde68a;
+  background: var(--accent-soft);
+  color: var(--accent-2) !important;
 }
 </style>

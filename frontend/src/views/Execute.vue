@@ -5,11 +5,11 @@
       <div class="exec-grid">
         <div>
           <div class="toolbar" style="margin-bottom: 10px">
-            <el-input v-model="filter.q" placeholder="Choose" clearable size="small" style="width: 180px" />
+            <el-input v-model="filter.q" placeholder="搜索名称 / IP" clearable size="small" style="width: 180px" />
             <el-select v-model="filter.group_id" placeholder="全部分组" clearable size="small" style="width: 140px">
               <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
             </el-select>
-            <span class="muted">已选 {{ selectedIds.length }} 台 · Click info Can inter</span>
+            <span class="muted">已选 {{ selectedIds.length }} 台 · 点击行可进入单机执行</span>
           </div>
           <el-table
             v-loading="loadingServers"
@@ -52,7 +52,7 @@
                 v-model="form.command"
                 type="textarea"
                 :rows="7"
-                placeholder="例如：df -h&#10;支持多行脚本、管道、环境变量"
+                :placeholder="'例如：df -h\n支持多行脚本、管道、环境变量'"
               />
             </el-form-item>
             <el-form-item label="工作目录">
@@ -499,7 +499,7 @@ export default {
   margin-bottom: 14px;
   background: var(--bg-soft);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
 }
 .summary-item {
   display: flex;

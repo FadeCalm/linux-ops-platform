@@ -25,7 +25,7 @@
         <el-table-column label="任务" width="100">
           <template slot-scope="{ row }"><span class="mono">{{ shortId(row.id) }}</span></template>
         </el-table-column>
-        <el-table-column prop="command" label="命令" min-width="300" show-overflow-tooltip>
+        <el-table-column prop="command" label="命令" min-width="200" show-overflow-tooltip>
           <template slot-scope="{ row }"><span class="mono">{{ row.command }}</span></template>
         </el-table-column>
         <el-table-column label="状态" width="110">

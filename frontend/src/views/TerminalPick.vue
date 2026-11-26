@@ -27,33 +27,33 @@
         class="clickable-rows"
         @row-dblclick="open"
       >
-        <el-table-column prop="id" label="ID" width="70" />
-        <el-table-column prop="name" label="名称" min-width="160">
+        <el-table-column prop="id" label="ID" width="60" />
+        <el-table-column prop="name" label="名称" min-width="140">
           <template slot-scope="{ row }"><strong>{{ row.name }}</strong></template>
         </el-table-column>
-        <el-table-column label="Agent 地址" min-width="170">
+        <el-table-column label="Agent 地址" min-width="160">
           <template slot-scope="{ row }"><span class="mono">{{ row.ip }}:{{ row.agent_port }}</span></template>
         </el-table-column>
-        <el-table-column prop="hostname" label="主机名" min-width="150">
+        <el-table-column prop="hostname" label="主机名" min-width="130">
           <template slot-scope="{ row }">{{ row.hostname || '-' }}</template>
         </el-table-column>
-        <el-table-column label="系统 / 架构" width="150">
+        <el-table-column label="系统 / 架构" width="130">
           <template slot-scope="{ row }">
             <span class="muted">{{ row.os || '-' }} / {{ row.arch || '-' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="110">
+        <el-table-column label="状态" width="90">
           <template slot-scope="{ row }">
             <span class="status-badge" :class="statusClass(row.status)">{{ statusText(row.status) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="Agent 版本" width="120">
+        <el-table-column label="Agent 版本" width="110">
           <template slot-scope="{ row }"><span class="mono">{{ row.agent_version || '-' }}</span></template>
         </el-table-column>
-        <el-table-column label="最后心跳" width="170">
+        <el-table-column label="最后心跳" width="160">
           <template slot-scope="{ row }">{{ formatTime(row.last_heartbeat_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="120" fixed="right">
+        <el-table-column label="操作" width="110" fixed="right">
           <template slot-scope="{ row }">
             <el-button type="text" icon="el-icon-connection" @click.stop="open(row)">打开终端</el-button>
           </template>
@@ -122,5 +122,4 @@ export default {
 .pick-foot {
   margin-top: 12px;
   font-size: 11.5px;
-}
-</style>
+}</style>

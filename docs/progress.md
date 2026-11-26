@@ -3,7 +3,7 @@
 > 原则：**只记录真正执行过的验证**。Windows 开发机无法验证的东西，
 > 一律放在「待 Linux 验证」中，不写成已完成。
 
-最后更新：2026-11-06
+最后更新：2026-11-26
 
 ## 环境
 
@@ -517,3 +517,111 @@ MySQL 与 MinIO 连接信息统一到 `configs/local.yaml`（含口令，已加�
 | 5 | 重新构建 agent/backend/server/frontend 包 | `sha256sum -c` 全部 OK；安装包内 `agent.yaml` 为 `auto` |
 
 注意：旧版 Agent 二进制不认识 `auto`，升级时必须同时替换二进制与配置。
+
+## 前端终端多标签与交互改进（2026-11-26）
+
+改动：
+
+- 去掉左侧「环境提示」区块（App.vue 侧栏只保留导航）；
+- 交互终端改为**多标签工作区**：`Terminal.vue` 负责标签、主机信息和全屏，
+  新增 `components/TerminalPane.vue` 承载单个 xterm + WebSocket 会话；所有标签
+  保持挂载（v-show），切换标签不中断会话；
+- 从 Resource 或「选择主机」页进入时**自动连接**，无需再点「连接」；断开后才需要
+  手动重连；
+- 终端字号可在 11/12/13/14/16 之间切换（默认 12，localStorage 记忆），并在
+  挂载、标签激活、字体就绪、WebSocket 握手完成时重新 fit，避免列数停在 80 导致
+  提前换行；
+- 标签列表存 `sessionStorage`（`wxgzt.terminal.tabs`）：离开页面会终止 PTY，
+  再次进入自动恢复标签并重新连接；
+- File 页与「新终端」主机下拉改为 `filterable remote`：输入 IP/名称时调用
+  后端 `GET /servers?q=`（匹配 name/ip/hostname）远程搜索，不受下拉首屏
+  200 条限制；清空关键字恢复完整列表；
+- 标签支持关闭（连接中的标签会确认），关闭最后一个标签回到选择主机页。
+
+验证：
+
+| # | 场景 | 结果 |
+|---|---|---|
+| 1 | `npm run build`（Vite + Vue 2） | 通过，产物在 `frontend/dist/ops-wxgzt/` |
+| 2 | 多标签会话隔离 | 每个标签独立 TerminalPane/WebSocket，切换不销毁 |
+| 3 | 自动连接 | 标签创建后立即连接；失败显示 Agent 返回原因 |
+
+已知边界：离开终端页面（去 Resource 等其他菜单）会按既有设计终止远端 Shell；
+再次进入按保存的标签恢复并自动重连。若需要「终端在后台持续运行」，需把工作区
+提升为全局常驻组件，本次未做。
+
+## 全站视觉刷新：机架面板（2026-11-26）
+
+方向：以机柜/机架面板为参照，石墨底 + 铜色高光，专业运维工具而不是通用 SaaS 卡片。
+
+改动：
+
+- 重写 `frontend/src/styles/theme.scss` 作为唯一视觉来源：深色石墨（默认）与
+  「阳极氧化铝」亮色两套 token，通过 `<html data-theme>` 切换；铜色只用于
+  「当前在哪」和「主要动作」，绿/黄/红只表示 LED 状态；
+- 字体改为 IBM Plex Sans（界面）+ IBM Plex Mono（IP、命令、数字、时间），
+  经 `@fontsource` 打入构建产物（latin 子集），中文回退系统 CJK 字体，
+  运行时不需要外网 CDN；
+- 顶栏 56px：品牌方牌 + 铜色导轨 + 后端在线 LED；侧栏 216px 扁平导航，
+  选中项铜色左轨；面板统一 `--radius` 圆角、1px 描边、顶部内高光，
+  不使用投影或渐变装饰；统计条合并为一条连续机架格；
+- Element UI 的表头/行高/输入框/按钮/标签/分页/复选框/对话框/消息条
+  全部按 token 覆盖；警告类按钮改为描边；状态标签按 success/warn/danger
+  着色；组合输入框的前后置按钮不再出现 Element 默认浅灰块；
+- 终端 xterm 主题随明暗切换（石墨 `#0b0f11` / 纸面 `#fbfbf9`），
+  光标与选区使用铜色；
+- 交互细节：登录页改为机架卡片；服务器表把「状态 / Agent 版本」前移到
+  名称之后，横向滚动时关键列不被右侧固定的操作列挡住；任务历史收窄
+  「命令」列，结束时间与操作列不再被裁切；命令执行页清理模板占位文案；
+- 无障碍：`:focus-visible` 铜色描边，`prefers-reduced-motion` 下关闭动画。
+
+验证：
+
+| # | 场景 | 结果 |
+|---|---|---|
+| 1 | `npm run build` | 通过：394 modules；CSS 273.87 kB；字体文件随包输出 |
+| 2 | headless Edge 截图（深/浅 × 登录、概览、服务器、命令、文件、历史、用户、终端工作区） | 布局、配色、状态徽标、标签、表格固定列均正常 |
+| 3 | 空列表与本机 mock 数据（12 台主机、5 个任务） | 两种状态均无溢出/错位；关键列可读 |
+| 4 | `bash scripts/build-release.sh --frontend-only` + `sha256sum -c` | 通过；`wxgzt-ops-frontend-0.2.0.tar.gz` 已更新 |
+
+已知边界：
+
+- 视觉验证在 Windows 上用 headless Edge + 本机 mock 接口完成，未在真实
+  Linux 部署环境复查；字体随包发布，内网无外网也能显示；
+- 「铝」亮色主题主要用于白天/投屏，默认仍是石墨深色；
+- 本次为纯前端改动，`scripts/build-release.sh --frontend-only` 不重新生成
+  server bundle；需要连同后端一起分发时运行完整构建。
+
+## 终端自适应尺寸修复（2026-11-26）
+
+现象：线上交互终端面板很宽，但 PTY 尺寸一直显示 `80 × 24`，输入长命令时在约
+半宽处折行，右侧大片空白。
+
+原因：xterm 在面板不可见（`v-show` 隐藏的标签）时测量出的字符单元尺寸为 0；
+`FitAddon.fit()` 遇到 0 尺寸会**静默返回**，而 xterm 只会在字体选项变化或
+元素重新可见时重新测量，于是尺寸永久停留在构造时的默认 `80 × 24`。线上关闭页面
+再进入（标签从 sessionStorage 恢复）后切换标签，正好会走到这条路径。
+
+处理（`frontend/src/components/TerminalPane.vue`）：
+
+- 用 `IntersectionObserver` 监听终端容器，面板一可见就重新 fit；
+- `doFit()` 先用 `fitAddon.proposeDimensions()` 判断字符尺寸是否可用，不可用时
+  每 100ms 重试（上限 10 次），标签激活/重新可见时重置重试次数，不再静默放弃；
+- 字体加载完成后切换一次 `fontSize` 选项，让 xterm 重新测量字符单元再 fit，
+  避免按回退字体的字宽排版；
+- 标签切换、全屏、窗口缩放、WebSocket 握手完成时继续 fit，`onResize` 会把新的
+  cols/rows 推给 PTY。
+
+验证：
+
+| # | 场景 | 结果 |
+|---|---|---|
+| 1 | 直接打开 `/servers/1/terminal`，窗口 1440×900 | `157 × 30` |
+| 2 | 同一页面窗口 1920×1080 | `224 × 40` |
+| 3 | 恢复两个标签后切换到「挂载时隐藏」的第二个标签 | 切换后自动 fit，`157 × 30` |
+| 4 | `npm run build` + `build-release.sh --frontend-only` + `sha256sum -c` | 通过，前端包已更新 |
+
+说明：本地无法稳定复现线上那一块 `80 × 24` 的终端（xterm 的
+IntersectionObserver 有时会自愈，属于时序问题），因此上述加固覆盖了所有已知
+时序路径。旧前端包不会自动更新，线上需要替换
+`wxgzt-ops-frontend-0.2.0.tar.gz` 后强制刷新页面再确认。

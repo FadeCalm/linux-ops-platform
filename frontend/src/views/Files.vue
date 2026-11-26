@@ -2,7 +2,16 @@
   <div>
     <div class="panel">
       <div class="toolbar">
-        <el-select v-model="serverId" placeholder="选择服务器" style="width: 230px" @change="onServerChange">
+        <el-select
+          v-model="serverId"
+          filterable
+          remote
+          :remote-method="searchServers"
+          :loading="serverSearching"
+          placeholder="搜索 IP / 名称选择服务器"
+          style="width: 260px"
+          @change="onServerChange"
+        >
           <el-option
             v-for="s in servers"
             :key="s.id"
@@ -161,6 +170,7 @@ export default {
       entries: [],
       total: 0,
       loading: false,
+      serverSearching: false,
       showHidden: false,
       uploading: false,
       uploadName: '',
@@ -197,22 +207,45 @@ export default {
     this.serverId = Number(this.$route.query.server) || null
     this.path = this.$route.query.path || '/'
     this.pathInput = this.path
-    this.loadServers()
+    this.loadServers(true)
   },
   methods: {
     statusText,
     formatTime,
-    async loadServers() {
+    async loadServers(initial) {
       try {
         const res = await api.servers.list({ page: 1, page_size: 200 })
         this.servers = res.items || []
-        if (!this.serverId && this.servers.length) {
+        if (initial && !this.serverId && this.servers.length) {
           const online = this.servers.find((s) => s.status === 'online')
           this.serverId = (online || this.servers[0]).id
         }
-        if (this.serverId) this.load()
+        if (initial && this.serverId) this.load()
       } catch (e) {
         this.$message.error(e.message)
+      }
+    },
+    // Server-side search: the backend matches name, IP and hostname, so typing
+    // an IP finds hosts that are not in the first page of the dropdown.
+    async searchServers(query) {
+      const q = (query || '').trim()
+      if (!q) {
+        this.loadServers(false)
+        return
+      }
+      this.serverSearching = true
+      try {
+        const res = await api.servers.list({ page: 1, page_size: 50, q })
+        const items = res.items || []
+        // Keep the current selection visible so its label does not disappear
+        // when the search narrows the option list.
+        const selected = this.servers.find((s) => s.id === this.serverId)
+        if (selected && !items.some((s) => s.id === selected.id)) items.unshift(selected)
+        this.servers = items
+      } catch (e) {
+        this.$message.error(e.message || '搜索服务器失败')
+      } finally {
+        this.serverSearching = false
       }
     },
     onServerChange() {
@@ -456,14 +489,14 @@ export default {
   flex-wrap: wrap;
   gap: 2px;
   margin: -2px 0 12px;
-  font-family: Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12.5px;
   color: var(--muted);
 }
 .crumb {
   cursor: pointer;
   padding: 2px 5px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   color: var(--text);
 }
 .crumb:hover {
@@ -502,22 +535,16 @@ export default {
   margin-top: 12px;
   padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: var(--radius-sm);
   background: var(--panel-2);
 }
 .upload-name {
   min-width: 180px;
   color: var(--text);
-}
-.editor-meta {
+}.editor-meta {
   display: flex;
   gap: 16px;
   margin-bottom: 10px;
   font-size: 12px;
-}
-.editor-area >>> textarea {
-  font-family: 'JetBrains Mono', Consolas, monospace;
-  font-size: 12.5px;
-  line-height: 1.55;
 }
 </style>

@@ -76,7 +76,8 @@ linux-ops-platform/
 │   │       ├── Files.vue        文件管理
 │   │       ├── History.vue      任务历史
 │   │       ├── TerminalPick.vue 选择主机进入终端
-│   │       └── Terminal.vue     xterm.js 交互终端
+│   │       └── Terminal.vue     多标签终端工作区（xterm.js）
+│   │           └── components/TerminalPane.vue  单个 PTY 会话
 │   ├── vite.config.js           构建产物目录、dev 代理
 │   └── .env.example             VITE_BASE_PATH / VITE_API_BASE
 │
@@ -165,7 +166,7 @@ linux-ops-platform/
 | 批量执行 | 多机选择、命令/目录/超时、实时输出、取消、重试、下载日志 | `/execute` | `tasks.go`、`scheduler/`、`ws.go`、`logstore/` | 已实现，Linux 验证 |
 | 单机执行 | 快捷命令、实时输出、最近任务、取消/重试 | `/servers/:id/execute` | `ServerExec.vue`、`tasks.go` | 已实现 |
 | 文件管理 | 目录浏览、编辑保存（冲突检测）、分片上传、Range 下载、重命名、递归删除 | `/files` | `backend/internal/api/fs.go`、`agent/internal/api/fs.go` | 已实现 |
-| 交互终端 | xterm.js + PTY、cd/vim/top、Ctrl+C、窗口缩放、空闲/最长时长限制 | `/terminal` | `terminal.go`（两端）、`agent/internal/term/` | 已实现，Linux 验证 |
+| 交互终端 | xterm.js + PTY、多标签同时打开多个会话、打开即自动连接、字号可调/全屏、cd/vim/top、Ctrl+C、窗口缩放、空闲/最长时长限制 | `/terminal`、`/servers/:id/terminal` | `terminal.go`（两端）、`agent/internal/term/` | 已实现，Linux 验证 |
 | Agent 升级 | 桶扫描发现版本、有校验和时做 SHA256 校验、备份 `agent.old`、exec 原地重启、单台/批量 | `/servers` | `agent/internal/update/`、`agentupdate.go`、`Servers.vue` | 已实现，真实主机验证 |
 | 任务历史 | 状态/主机/时间筛选、分页、详情、日志回放、取消/重试/下载 | `/history` | `tasks.go`、`History.vue` | 已实现 |
 | 可靠性 | 幂等键、进程组终止、超时、后端重启恢复、WS 断线重放 | — | `scheduler/state.go`、`ws/hub.go` | 已实现，含单元测试 |

@@ -1,59 +1,28 @@
 <template>
-  <div>
-    <!-- server summary -->
-    <div v-loading="loadingServer" class="panel server-hero">
-      <div class="hero-left">
-        <el-button class="back-btn" size="mini" icon="el-icon-back" @click="goBack">返回服务器列表</el-button>
-        <div class="hero-id">
-          <div class="hero-name">
-            <strong>{{ server.name || '加载中…' }}</strong>
-            <span v-if="server.id" class="status-badge" :class="statusClass(server.status)">
-              {{ statusText(server.status) }}
-            </span>
-          </div>
-          <div class="hero-meta">
-            <span class="mono">{{ agentAddr }}</span>
-            <span class="muted">{{ server.hostname || '-' }}</span>
-            <span class="muted">{{ server.os || '-' }} / {{ server.arch || '-' }}</span>
-            <span class="muted mono">agent {{ server.agent_version || '-' }}</span>
-            <span class="muted">心跳 {{ formatTime(server.last_heartbeat_at) }}</span>
-          </div>
-        </div>
-      </div>
-      <div class="hero-actions">
-        <el-button size="mini" icon="el-icon-refresh" :loading="checking" @click="refreshServer">刷新状态</el-button>
-        <el-button size="mini" icon="el-icon-cpu" @click="goExec">单机执行</el-button>
-        <el-button size="mini" icon="el-icon-folder-opened" @click="goFiles">文件管理</el-button>
-        <el-button size="mini" icon="el-icon-document" @click="goHistory">任务历史</el-button>
-      </div>
-    </div>
-
-    <!-- interactive terminal -->
-    <div class="panel term-panel" :class="{ 'is-fullscreen': fullscreen }">
-      <div class="toolbar">
-        <span class="conn-badge" :class="'conn-' + state">{{ connLabel }}</span>
-        <span class="muted mono" v-if="server.ip">{{ server.ip }}:{{ server.agent_port || 19090 }}</span>
-        <span class="muted">会话时长 {{ elapsedLabel }}</span>
-        <span class="muted">终端尺寸 {{ cols }} × {{ rows }}</span>
-        <span class="muted" v-if="shellHint">{{ shellHint }}</span>
+  <div class="terminal-workspace" :class="{ 'is-fullscreen': fullscreen }">
+    <div v-loading="loading" class="panel workspace-panel">
+      <div class="ws-tabs">
+        <button
+          v-for="tab in tabs"
+          :key="tab.id"
+          type="button"
+          class="ws-tab"
+          :class="{ active: tab.id === activeId }"
+          @click="activate(tab.id)"
+        >
+          <span class="ws-dot" :class="dotClass(tab.id)"></span>
+          <span class="ws-tab-name">{{ tabLabel(tab) }}</span>
+          <span class="ws-tab-ip mono">{{ tab.server.ip }}</span>
+          <i class="el-icon-close ws-tab-close" @click.stop="closeTab(tab.id)"></i>
+        </button>
+        <el-button class="ws-add" size="mini" icon="el-icon-plus" @click="openPicker">新终端</el-button>
         <div class="spacer"></div>
-        <el-button size="mini" icon="el-icon-delete" @click="clearScreen">清屏</el-button>
-        <el-button size="mini" icon="el-icon-document-copy" @click="copySelection">复制选区</el-button>
-        <el-button
-          v-if="!connected"
-          size="mini"
-          type="primary"
-          icon="el-icon-connection"
-          :loading="state === 'connecting'"
-          @click="connect"
-        >连接</el-button>
-        <el-button
-          v-else
-          size="mini"
-          type="danger"
-          icon="el-icon-switch-button"
-          @click="disconnect(true)"
-        >断开</el-button>
+        <el-select v-model="fontSize" size="mini" class="ws-font" title="终端字号">
+          <el-option v-for="s in fontSizes" :key="s" :label="s + ' px'" :value="s" />
+        </el-select>
+        <el-button size="mini" icon="el-icon-refresh" :loading="refreshing" @click="refreshServers">
+          刷新状态
+        </el-button>
         <el-button
           size="mini"
           :icon="fullscreen ? 'el-icon-close' : 'el-icon-full-screen'"
@@ -61,523 +30,562 @@
         >{{ fullscreen ? '退出全屏' : '全屏' }}</el-button>
       </div>
 
-      <div ref="host" class="xterm-host"></div>
+      <div v-if="activeTab" class="ws-meta">
+        <strong>{{ tabLabel(activeTab) }}</strong>
+        <span class="status-badge" :class="statusClass(activeTab.server.status)">
+          {{ statusText(activeTab.server.status) }}
+        </span>
+        <span class="mono">{{ activeTab.server.ip }}:{{ activeTab.server.agent_port || 19090 }}</span>
+        <span class="muted">{{ activeTab.server.hostname || '-' }}</span>
+        <span class="muted">{{ activeTab.server.os || '-' }} / {{ activeTab.server.arch || '-' }}</span>
+        <span class="muted mono">agent {{ activeTab.server.agent_version || '-' }}</span>
+        <span class="muted">心跳 {{ formatTime(activeTab.server.last_heartbeat_at) }}</span>
+        <div class="spacer"></div>
+        <el-button size="mini" icon="el-icon-cpu" @click="goExec">单机执行</el-button>
+        <el-button size="mini" icon="el-icon-folder-opened" @click="goFiles">文件管理</el-button>
+        <el-button size="mini" icon="el-icon-document" @click="goHistory">任务历史</el-button>
+      </div>
 
+      <div class="ws-body">
+        <TerminalPane
+          v-for="tab in tabs"
+          :key="tab.id"
+          ref="panes"
+          :server="tab.server"
+          :active="tab.id === activeId"
+          :font-size="fontSize"
+          @state="onPaneState(tab.id, $event)"
+        />
+        <div v-if="!tabs.length && !loading" class="ws-empty">
+          <i class="el-icon-connection"></i>
+          <p>还没有打开的终端</p>
+          <el-button type="primary" size="small" icon="el-icon-plus" @click="openPicker">
+            选择主机打开终端
+          </el-button>
+        </div>
+      </div>
     </div>
+
+    <el-dialog title="打开新终端" :visible.sync="pickerVisible" width="460px">
+      <el-select
+        v-model="pickerId"
+        filterable
+        remote
+        :remote-method="searchPickerServers"
+        :loading="pickerSearching"
+        placeholder="搜索 IP / 名称"
+        style="width: 100%"
+      >
+        <el-option
+          v-for="s in servers"
+          :key="s.id"
+          :value="s.id"
+          :label="serverLabel(s)"
+        />
+      </el-select>
+      <div class="picker-tip muted">
+        已打开的终端不会重复创建，选择后会直接切换过去。
+      </div>
+      <span slot="footer">
+        <el-button @click="pickerVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="!pickerId" @click="openPicked">打开终端</el-button>
+      </span>
+    </el-dialog>
   </div>
 </template>
 
 <script>
-import { Terminal } from 'xterm'
-import { FitAddon } from 'xterm-addon-fit'
-import 'xterm/css/xterm.css'
 import api from '@/api'
-import { wsUrl } from '@/api/base'
+import TerminalPane from '@/components/TerminalPane.vue'
 import { formatTime, statusClass, statusText } from '@/utils/format'
 
-const TERMINAL_THEME = {
-  background: '#ffffff',
-  foreground: '#1f2329',
-  cursor: '#111111',
-  cursorAccent: '#ffffff',
-  selectionBackground: 'rgba(9, 105, 218, 0.24)',
-  black: '#000000',
-  red: '#cd3131',
-  green: '#00bc00',
-  yellow: '#949800',
-  blue: '#0451a5',
-  magenta: '#bc05bc',
-  cyan: '#0598bc',
-  white: '#555555',
-  brightBlack: '#666666',
-  brightRed: '#cd3131',
-  brightGreen: '#14ce14',
-  brightYellow: '#b5ba00',
-  brightBlue: '#0451a5',
-  brightMagenta: '#bc05bc',
-  brightCyan: '#0598bc',
-  brightWhite: '#a5a5a5'
+const TABS_KEY = 'wxgzt.terminal.tabs'
+const FONT_KEY = 'wxgzt.terminal.fontSize'
+const FONT_SIZES = [11, 12, 13, 14, 16]
+
+function readSavedTabs() {
+  try {
+    const raw = sessionStorage.getItem(TABS_KEY)
+    const list = raw ? JSON.parse(raw) : []
+    return Array.isArray(list) ? list : []
+  } catch (e) {
+    return []
+  }
 }
 
+function readFontSize() {
+  try {
+    const v = Number(localStorage.getItem(FONT_KEY))
+    return FONT_SIZES.includes(v) ? v : 12
+  } catch (e) {
+    return 12
+  }
+}
+
+// The terminal workspace keeps one TerminalPane per tab, all mounted, so
+// several PTY sessions can stay open at once and survive tab switches. Only
+// the tab list is persisted (sessionStorage): navigating away closes the PTYs,
+// and returning reopens the same tabs with auto-connect.
 export default {
-  name: 'TerminalView',
+  name: 'TerminalWorkspace',
+  components: { TerminalPane },
   data() {
     return {
-      loadingServer: false,
-      checking: false,
-      server: {},
-      // idle | connecting | open | closed | error
-      state: 'idle',
-      cols: 80,
-      rows: 24,
-      elapsedSec: 0,
-      lastMessage: '',
-      // CSS fullscreen overlay (not the browser Fullscreen API, so Esc stays
-      // available to the remote shell for vim/top).
-      fullscreen: false
+      loading: false,
+      refreshing: false,
+      tabs: [],
+      activeId: null,
+      paneStates: {},
+      servers: [],
+      pickerVisible: false,
+      pickerId: null,
+      pickerSearching: false,
+      fullscreen: false,
+      fontSize: readFontSize(),
+      fontSizes: FONT_SIZES
     }
   },
   computed: {
-    serverId() {
-      return Number(this.$route.params.id)
+    activeTab() {
+      return this.tabs.find((t) => t.id === this.activeId) || null
     },
-    agentAddr() {
-      if (!this.server.ip) return '-'
-      return `${this.server.ip}:${this.server.agent_port || 19090}`
-    },
-    connected() {
-      return this.state === 'open' || this.state === 'connecting'
-    },
-    connLabel() {
-      return {
-        idle: '未连接',
-        connecting: '连接中',
-        open: '已连接',
-        closed: '已断开',
-        error: '连接失败'
-      }[this.state]
-    },
-    elapsedLabel() {
-      const s = this.elapsedSec
-      const m = Math.floor(s / 60)
-      const r = s % 60
-      return m > 0 ? `${m}m ${String(r).padStart(2, '0')}s` : `${r}s`
-    },
-    shellHint() {
-      return this.state === 'error' && this.lastMessage ? this.lastMessage : ''
+    connectedTabs() {
+      return this.tabs.filter((t) => ['open', 'connecting'].includes(this.paneStates[t.id]))
     }
   },
   watch: {
-    '$route.params.id'(next, prev) {
-      if (next && next !== prev) this.bootstrap()
+    '$route.params.id'(next) {
+      if (next) this.ensureTab(Number(next))
+    },
+    fontSize(v) {
+      try {
+        localStorage.setItem(FONT_KEY, String(v))
+      } catch (e) {
+        /* private mode */
+      }
     }
   },
-  mounted() {
-    this.initTerminal()
-    this.bootstrap()
+  async mounted() {
     this.beforeUnload = (e) => {
-      if (!this.connected) return undefined
+      if (!this.connectedTabs.length) return undefined
       e.preventDefault()
       e.returnValue = ''
       return ''
     }
     window.addEventListener('beforeunload', this.beforeUnload)
+
+    this.loading = true
+    try {
+      await this.loadServers()
+      const byId = new Map(this.servers.map((s) => [s.id, s]))
+      const savedIds = readSavedTabs()
+        .map((t) => Number(t.id))
+        .filter((id) => id && !Number.isNaN(id))
+      // The list endpoint is capped at 200 rows; fetch saved tabs outside that
+      // page individually instead of silently dropping them.
+      const missing = savedIds.filter((id) => !byId.has(id))
+      if (missing.length) {
+        const fetched = await Promise.all(
+          missing.map((id) => api.servers.get(id).catch(() => null))
+        )
+        fetched.forEach((srv) => {
+          if (!srv) return
+          byId.set(srv.id, srv)
+          this.servers.push(srv)
+        })
+      }
+      const restored = savedIds.map((id) => byId.get(id)).filter(Boolean)
+      this.tabs = restored.map((s) => ({ id: s.id, server: s }))
+      this.tabs.forEach((t) => this.$set(this.paneStates, t.id, 'idle'))
+
+      const routeId = Number(this.$route.params.id)
+      if (routeId && !this.tabs.some((t) => t.id === routeId)) {
+        await this.addTab(routeId)
+      } else if (routeId) {
+        this.activate(routeId, true)
+      }
+      if (!this.activeId && this.tabs.length) this.activate(this.tabs[0].id, true)
+      this.saveTabs()
+    } catch (e) {
+      /* loadServers already reported the failure; the empty state remains */
+    } finally {
+      this.loading = false
+    }
   },
   beforeRouteLeave(to, from, next) {
-    if (!this.connected) {
+    if (!this.connectedTabs.length) {
       next()
       return
     }
-    const ok = window.confirm('当前交互式会话仍在连接，离开页面会终止远端 Shell。确定离开？')
+    const names = this.connectedTabs.map((t) => this.tabLabel(t)).join('、')
+    const ok = window.confirm(`终端「${names}」仍在连接，离开页面会终止远端 Shell。确定离开？`)
     next(ok)
   },
   beforeDestroy() {
     window.removeEventListener('beforeunload', this.beforeUnload)
-    this.teardown()
   },
   methods: {
     formatTime,
     statusClass,
     statusText,
 
-    async bootstrap() {
-      this.resetTerminal()
-      await this.loadServer()
+    tabLabel(tab) {
+      const s = tab.server || {}
+      return s.name || s.hostname || s.ip || `#${tab.id}`
     },
-    resetTerminal() {
-      this.disconnect(false)
-      if (this.term) {
-        this.term.reset()
-        this.term.writeln('就绪。点击「连接」在目标主机上打开交互式 Shell（PTY）。')
-      }
-      this.elapsedSec = 0
-      this.lastMessage = ''
-      this.state = 'idle'
+    serverLabel(s) {
+      const st = s.status ? ` · ${statusText(s.status)}` : ''
+      return `${s.name || s.hostname || s.ip} (${s.ip})${st}`
     },
-    initTerminal() {
-      this.term = new Terminal({
-        cursorBlink: true,
-        fontSize: 13,
-        lineHeight: 1.25,
-        fontFamily: '"JetBrains Mono", "Fira Code", Consolas, "DejaVu Sans Mono", monospace',
-        scrollback: 5000,
-        theme: TERMINAL_THEME
-      })
-      this.fitAddon = new FitAddon()
-      this.term.loadAddon(this.fitAddon)
-      this.term.open(this.$refs.host)
-      this.doFit()
-
-      // Keystrokes go to the agent as *binary* frames; the agent treats text
-      // frames as control messages (resize).
-      this.term.onData((data) => this.sendInput(data))
-      this.term.onResize(({ cols, rows }) => {
-        this.cols = cols
-        this.rows = rows
-        this.sendResize()
-      })
-
-      if (typeof ResizeObserver !== 'undefined') {
-        this.resizeObserver = new ResizeObserver(() => this.doFit())
-        this.resizeObserver.observe(this.$refs.host)
-      }
-      window.addEventListener('resize', this.doFit)
+    dotClass(id) {
+      const st = this.paneStates[id]
+      if (st === 'open') return 'open'
+      if (st === 'connecting') return 'connecting'
+      if (st === 'error' || st === 'closed') return 'error'
+      return 'idle'
     },
-    doFit() {
-      if (!this.fitAddon || !this.$refs.host) return
-      const el = this.$refs.host
-      if (!el.clientWidth || !el.clientHeight) return
+    onPaneState(id, state) {
+      // A pane keeps emitting while its tab is being closed (the socket closes
+      // asynchronously); ignore states for tabs that no longer exist.
+      if (!this.tabs.some((t) => t.id === id)) return
+      this.$set(this.paneStates, id, state)
+    },
+    saveTabs() {
       try {
-        this.fitAddon.fit()
+        const slim = this.tabs.map((t) => ({ id: t.id, name: this.tabLabel(t), ip: t.server.ip }))
+        sessionStorage.setItem(TABS_KEY, JSON.stringify(slim))
       } catch (e) {
-        /* xterm can throw while the element is hidden; ignore */
-      }
-    },
-    teardown() {
-      this.disconnect(false)
-      this.stopTimer()
-      window.removeEventListener('resize', this.doFit)
-      if (this.resizeObserver) {
-        this.resizeObserver.disconnect()
-        this.resizeObserver = null
-      }
-      if (this.term) {
-        this.term.dispose()
-        this.term = null
+        /* private mode */
       }
     },
 
-    async loadServer() {
-      if (!this.serverId || Number.isNaN(this.serverId)) {
-        this.$message.error('无效的服务器 ID')
-        this.$router.replace('/servers')
+    async loadServers() {
+      try {
+        const res = await api.servers.list({ page: 1, page_size: 200 })
+        this.servers = res.items || res || []
+      } catch (e) {
+        this.$message.error(e.message || '加载服务器失败')
+        throw e
+      }
+    },
+
+    async ensureTab(id) {
+      if (!id || Number.isNaN(id)) return
+      if (this.tabs.some((t) => t.id === id)) {
+        this.activate(id)
         return
       }
-      this.loadingServer = true
-      try {
-        this.server = await api.servers.get(this.serverId)
-      } catch (e) {
-        this.$message.error(e.message || '服务器不存在')
-        this.$router.replace('/servers')
-      } finally {
-        this.loadingServer = false
+      await this.addTab(id)
+    },
+
+    async addTab(id) {
+      let srv = this.servers.find((s) => s.id === id)
+      if (!srv) {
+        try {
+          srv = await api.servers.get(id)
+          this.servers.push(srv)
+        } catch (e) {
+          this.$message.error(e.message || '服务器不存在或无权访问')
+          if (!this.tabs.length) this.$router.replace('/terminal')
+          return false
+        }
+      }
+      this.tabs.push({ id: srv.id, server: srv })
+      this.$set(this.paneStates, srv.id, 'idle')
+      this.activate(srv.id)
+      this.saveTabs()
+      return true
+    },
+
+    activate(id, silent) {
+      this.activeId = id
+      if (Number(this.$route.params.id) !== id) {
+        const nav = this.$router.replace({ name: 'terminal', params: { id: String(id) } })
+        if (nav && nav.catch) nav.catch(() => {})
+      }
+      if (!silent) this.$nextTick(() => this.focusActive())
+    },
+
+    focusActive() {
+      const pane = this.activePane()
+      if (pane) pane.focusPane()
+    },
+    paneList() {
+      const r = this.$refs.panes
+      if (!r) return []
+      return Array.isArray(r) ? r : [r]
+    },
+    activePane() {
+      const idx = this.tabs.findIndex((t) => t.id === this.activeId)
+      if (idx < 0) return null
+      return this.paneList()[idx] || null
+    },
+
+    closeTab(id) {
+      const tab = this.tabs.find((t) => t.id === id)
+      if (!tab) return
+      const connected = ['open', 'connecting'].includes(this.paneStates[id])
+      if (!connected) {
+        this.doCloseTab(id)
+        return
+      }
+      this.$confirm(
+        `终端「${this.tabLabel(tab)}」仍在连接，关闭会终止远端 Shell。确定关闭？`,
+        '关闭终端',
+        { type: 'warning' }
+      )
+        .then(() => this.doCloseTab(id))
+        .catch(() => {})
+    },
+    doCloseTab(id) {
+      const i = this.tabs.findIndex((t) => t.id === id)
+      if (i < 0) return
+      this.tabs.splice(i, 1)
+      this.$delete(this.paneStates, id)
+      this.saveTabs()
+      if (this.activeId !== id) return
+      if (this.tabs.length) {
+        this.activate(this.tabs[Math.min(i, this.tabs.length - 1)].id)
+      } else {
+        this.activeId = null
+        this.$router.replace('/terminal')
       }
     },
-    // Re-read the server record (kept fresh by the backend heartbeat). Health
-    // checks are now a batch action on the server list.
-    async refreshServer() {
-      if (!this.serverId) return
-      this.checking = true
+
+    openPicker() {
+      this.pickerId = null
+      this.pickerVisible = true
+      this.loadServers().catch(() => {})
+    },
+    // Same server-side IP/name/hostname search as the File page.
+    async searchPickerServers(query) {
+      const q = (query || '').trim()
+      if (!q) {
+        this.loadServers().catch(() => {})
+        return
+      }
+      this.pickerSearching = true
       try {
-        this.server = await api.servers.get(this.serverId)
+        const res = await api.servers.list({ page: 1, page_size: 50, q })
+        const items = res.items || []
+        const selected = this.servers.find((s) => s.id === this.pickerId)
+        if (selected && !items.some((s) => s.id === selected.id)) items.unshift(selected)
+        this.servers = items
+      } catch (e) {
+        this.$message.error(e.message || '搜索服务器失败')
+      } finally {
+        this.pickerSearching = false
+      }
+    },
+    async openPicked() {
+      if (!this.pickerId) return
+      const ok = await this.addTab(this.pickerId)
+      if (ok) this.pickerVisible = false
+    },
+
+    async refreshServers() {
+      this.refreshing = true
+      try {
+        await this.loadServers()
+        this.tabs.forEach((t) => {
+          const srv = this.servers.find((s) => s.id === t.id)
+          if (srv) this.$set(t, 'server', srv)
+        })
         this.$message.success('状态已刷新')
       } catch (e) {
-        this.$message.error(e.message)
+        /* loadServers already reported it */
       } finally {
-        this.checking = false
+        this.refreshing = false
       }
     },
 
-    connect() {
-      if (!this.serverId || this.connected) return
-      if (this.server.status && this.server.status !== 'online') {
-        this.term.writeln('\x1b[33m[提示] 该主机状态不是 online，连接仍会尝试；失败请先检查 Agent。\x1b[0m')
-      }
-      this.state = 'connecting'
-      this.lastMessage = ''
-      this.term.writeln('\x1b[90m正在连接 ' + this.agentAddr + ' …\x1b[0m')
-
-      let ws
-      try {
-        ws = new WebSocket(wsUrl(`/ws/terminal/${this.serverId}`))
-      } catch (e) {
-        this.state = 'error'
-        this.lastMessage = e.message
-        return
-      }
-      ws.binaryType = 'arraybuffer'
-      this.ws = ws
-      this.closing = false
-
-      ws.onopen = () => {
-        this.state = 'open'
-        this.resetTimer()
-        this.startTimer()
-        this.sendResize()
-        this.term.focus()
-      }
-      ws.onmessage = (ev) => this.onFrame(ev)
-      ws.onerror = () => {
-        this.state = 'error'
-        this.lastMessage = this.lastMessage || 'WebSocket 连接错误'
-      }
-      ws.onclose = () => {
-        this.stopTimer()
-        this.ws = null
-        if (this.closing) {
-          this.state = 'idle'
-          this.closing = false
-          return
-        }
-        if (this.state !== 'error') this.state = 'closed'
-        this.term.writeln('\r\n\x1b[90m[连接已关闭] 远端 Shell 已终止，如需继续请重新连接。\x1b[0m')
-      }
-    },
-    disconnect(announce) {
-      if (this.ws) {
-        this.closing = true
-        try {
-          this.ws.close()
-        } catch (e) {
-          /* already closed */
-        }
-        this.ws = null
-      }
-      this.stopTimer()
-      if (announce) {
-        this.state = 'idle'
-        if (this.term) this.term.writeln('\r\n\x1b[90m[已断开]\x1b[0m')
-      }
-    },
-    onFrame(ev) {
-      if (typeof ev.data === 'string') {
-        let msg
-        try {
-          msg = JSON.parse(ev.data)
-        } catch (e) {
-          return
-        }
-        this.handleControl(msg)
-        return
-      }
-      if (ev.data instanceof ArrayBuffer && this.term) {
-        this.term.write(new Uint8Array(ev.data))
-      }
-    },
-    handleControl(msg) {
-      switch (msg.type) {
-        case 'error':
-          this.state = 'error'
-          this.lastMessage = msg.message || '连接失败'
-          this.term.writeln(`\r\n\x1b[31m[连接失败] ${this.lastMessage}\x1b[0m`)
-          break
-        case 'notice':
-          this.term.writeln(`\r\n\x1b[33m[提示] ${msg.message}\x1b[0m`)
-          break
-        case 'exit':
-          this.term.writeln(
-            `\r\n\x1b[90m[会话结束] 退出码 ${msg.code === undefined ? '-' : msg.code}\x1b[0m`
-          )
-          break
-        default:
-          break
-      }
-    },
-    sendInput(data) {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-      this.ws.send(new TextEncoder().encode(data))
-    },
-    sendResize() {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-      try {
-        this.ws.send(JSON.stringify({ type: 'resize', cols: this.cols, rows: this.rows }))
-      } catch (e) {
-        /* ignore */
-      }
-    },
-    resetTimer() {
-      this.elapsedSec = 0
-      this.startedAt = Date.now()
-    },
-    startTimer() {
-      this.stopTimer()
-      this.timer = setInterval(() => {
-        this.elapsedSec = Math.floor((Date.now() - this.startedAt) / 1000)
-      }, 1000)
-    },
-    stopTimer() {
-      if (this.timer) {
-        clearInterval(this.timer)
-        this.timer = null
-      }
-    },
-    clearScreen() {
-      if (this.term) {
-        this.term.clear()
-        this.term.focus()
-      }
-    },
     toggleFullscreen() {
       this.fullscreen = !this.fullscreen
-      // The host element changes size, so recompute cols/rows once the new
-      // layout is applied (ResizeObserver also fires, this covers it early).
       this.$nextTick(() => {
-        this.doFit()
-        if (this.fullscreen && this.term) this.term.focus()
+        this.paneList().forEach((p) => p.fitSoon())
+        if (this.fullscreen) this.focusActive()
       })
     },
-    async copySelection() {
-      if (!this.term) return
-      const text = this.term.getSelection()
-      if (!text) {
-        this.$message.info('请先用鼠标选中要复制的终端内容')
-        return
-      }
-      try {
-        await navigator.clipboard.writeText(text)
-        this.$message.success('已复制选区')
-      } catch (e) {
-        this.$message.error('复制失败：' + e.message)
-      }
-    },
 
-    goBack() {
-      this.$router.push('/servers')
-    },
     goExec() {
-      this.$router.push(`/servers/${this.serverId}/execute`)
+      if (this.activeTab) this.$router.push(`/servers/${this.activeTab.id}/execute`)
     },
     goFiles() {
-      this.$router.push({ path: '/files', query: { server: this.serverId, path: '/' } })
+      if (this.activeTab) {
+        this.$router.push({ path: '/files', query: { server: this.activeTab.id, path: '/' } })
+      }
     },
     goHistory() {
-      this.$router.push({ path: '/history', query: { server_id: this.serverId } })
+      if (this.activeTab) {
+        this.$router.push({ path: '/history', query: { server_id: this.activeTab.id } })
+      }
     }
   }
 }
 </script>
 
 <style scoped>
-.server-hero {
+.workspace-panel {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  flex-wrap: wrap;
-}
-.hero-left {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  min-width: 0;
-}
-.hero-id {
-  min-width: 0;
-}
-.hero-name {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 18px;
-  color: var(--text-strong);
-}
-.hero-meta {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--muted);
-}
-.hero-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+  flex-direction: column;
 }
 
-.conn-badge {
-  display: inline-flex;
+.ws-tabs {
+  display: flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.ws-tabs .spacer {
+  flex: 1;
+}
+
+/* 机架标签：方形单元，激活时底部一条铜色导轨 */
+.ws-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 260px;
+  padding: 4px 8px 4px 9px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
+  background: var(--panel-2);
   color: var(--muted);
-  background: var(--muted-soft);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 120ms ease-out, border-color 120ms ease-out, background 120ms ease-out;
 }
-.conn-badge::before {
-  content: '';
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
+.ws-tab:hover {
+  color: var(--text);
+  border-color: var(--muted);
 }
-.conn-open {
-  color: var(--success);
-  background: var(--success-soft);
-  border-color: transparent;
+.ws-tab.active {
+  color: var(--text-strong);
+  border-color: var(--border);
+  background: var(--panel);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
-.conn-connecting {
-  color: var(--warn);
-  background: var(--warn-soft);
-  border-color: transparent;
-}
-.conn-error,
-.conn-closed {
-  color: var(--danger);
-  background: var(--danger-soft);
-  border-color: transparent;
-}
-
-/* The terminal keeps its own light palette in both UI themes, independent of
- * the surrounding panel theme. */
-.xterm-host {
-  background: #ffffff;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 8px 10px;
-  height: calc(100vh - 380px);
-  min-height: 420px;
+.ws-tab-name {
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-tab-ip {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  opacity: 0.75;
+}
+.ws-tab-close {
+  font-size: 12px;
+  opacity: 0.55;
+}
+.ws-tab-close:hover {
+  opacity: 1;
+  color: var(--danger);
 }
 
-/* Fullscreen terminal overlay: covers the viewport, toolbar stays visible and
- * the xterm host takes all remaining height. */
-.term-panel.is-fullscreen {
+.ws-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: 0 0 auto;
+}
+.ws-dot.open {
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+}
+.ws-dot.connecting {
+  background: var(--warn);
+}
+.ws-dot.error {
+  background: var(--danger);
+}
+
+.ws-font {
+  width: 88px;
+}
+
+.ws-meta {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.ws-meta strong {
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+.ws-meta .spacer {
+  flex: 1;
+}
+
+.ws-body {
+  position: relative;
+  display: flex;
+  height: calc(100vh - 320px);
+  min-height: 360px;
+}
+
+.ws-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+}
+.ws-empty i {
+  font-size: 26px;
+  color: var(--accent);
+}
+.ws-empty p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.picker-tip {
+  margin-top: 10px;
+  font-size: 11.5px;
+}
+
+/* Fullscreen workspace: the tab bar and meta stay visible, the active pane
+ * takes all remaining height. */
+.terminal-workspace.is-fullscreen .workspace-panel {
   position: fixed;
   inset: 0;
   z-index: 2000;
   margin: 0;
-  border-radius: 0;
   border: 0;
-  padding: 12px 16px 16px;
+  border-radius: 0;
+  padding: 10px 14px 14px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
-.term-panel.is-fullscreen .toolbar {
-  flex: 0 0 auto;
-  margin-bottom: 10px;
-}
-.term-panel.is-fullscreen .xterm-host {
+.terminal-workspace.is-fullscreen .ws-body {
   flex: 1 1 auto;
   height: auto;
   min-height: 0;
-  border-radius: 8px;
-}
-.xterm-host :deep(.xterm) {
-  height: 100%;
-}
-.xterm-host :deep(.xterm-viewport) {
-  background: transparent !important;
-}
-
-.term-foot {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 10px;
-  font-size: 11.5px;
-  line-height: 1.6;
-  color: var(--muted);
 }
 
 @media (max-width: 760px) {
-  .xterm-host {
+  .ws-body {
     height: 60vh;
+  }
+  .ws-tab-ip {
+    display: none;
   }
 }
 </style>
